@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+*.egg
+
+# Data (user-specific, contains bank data)
+data/inbox/*
+data/processed/*
+data/reports/*
+
+# Config (contains personal profile)
+config/profile.json
+config/categories.json
+config/reconciled.json
+
+# Keep directory structure
+!data/inbox/.gitkeep
+!data/processed/.gitkeep
+!data/reports/.gitkeep
+!config/.gitkeep
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Numbers files (bank data)
+*.numbers
