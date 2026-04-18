@@ -1,3 +1,5 @@
+import os
+import re
 import streamlit as st
 import pandas as pd
 import requests
@@ -5,6 +7,9 @@ import json
 import shutil
 from datetime import datetime
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from nordea_parser import (
     parse_any, load_all_processed, build_context, build_balance_sheet_context,
@@ -27,6 +32,18 @@ Prioriter: (1) katastrofebeskyttelse, (2) dyr gæld, (3) formue-opbygning. Svar 
 
 ANALYST_SYSTEM = """Du er en skarp finansanalytiker specialiseret i personlig økonomi.
 Vær direkte og konkret — brug DKK-tal, ingen floskler. Identificer mønstre, bekymrende udgifter og opsparingsmuligheder. Svar på dansk."""
+
+GOLDMAN_SYSTEM = """Du er Chief Wealth Strategist hos Goldman Sachs Private Wealth Management med 25 års erfaring.
+Lav strukturerede, datadrevne analyser med konkrete scores og DKK-tal. Identificer finansielle gaps og kvantificér konsekvenserne.
+Svar altid på dansk med professionel, direkte tone."""
+
+MORGAN_SYSTEM = """Du er Senior Portfolio Strategist hos Morgan Stanley Wealth Management, specialiseret i ETF-allokering og global diversificering for europæiske detailinvestorer.
+Analyser porteføljens sammensætning, geografisk eksponering og omkostningsstruktur.
+Svar altid på dansk med præcise, handlingsorienterede anbefalinger og konkrete procenttal."""
+
+WEALTHFRONT_SYSTEM = """Du er Real Estate Investment Analyst med speciale i det danske boligmarked, særligt København og omegn.
+Analyser boligøkonomi kvantitativt: cash-on-cash return, lejeækvivalens, alternativomkostning ved investering.
+Svar altid på dansk med konkrete tal og en klar Køb/Vent/Lej-anbefaling."""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -60,6 +77,44 @@ def ask_ollama(model, messages, system=None):
         return f"Fejl: {e}"
 
 
+def load_portfolio():
+    pf = CONFIG_DIR / "portfolio.json"
+    if pf.exists():
+        with open(pf, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _strip_merchant_names(context: str) -> str:
+    """Remove TOP 10 UDGIFTER section (contains individual merchant names) before sending to Claude API."""
+    return re.sub(r"\nTOP 10 UDGIFTER:.*?(?=\nBUDGET|\n===|\Z)", "", context, flags=re.DOTALL)
+
+
+def ask_claude_stream(prompt: str, system: str, context: str):
+    """Generator yielding text chunks from Claude API with stripped context (no merchant names)."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        yield "❌ ANTHROPIC_API_KEY mangler — opret en `.env`-fil i projektmappen med: `ANTHROPIC_API_KEY=sk-ant-...`"
+        return
+    try:
+        import anthropic
+    except ImportError:
+        yield "❌ anthropic-pakken mangler — kør: `pip install anthropic`"
+        return
+    payload = _strip_merchant_names(context)
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        with client.messages.stream(
+            model="claude-sonnet-4-6",
+            max_tokens=2000,
+            system=system,
+            messages=[{"role": "user", "content": f"Her er mine finansielle data:\n\n{payload}\n\n{prompt}"}],
+        ) as stream:
+            yield from stream.text_stream
+    except Exception as e:
+        yield f"❌ Claude API fejl: {e}"
+
+
 def get_models():
     try:
         r = requests.get("http://localhost:11434/api/tags", timeout=5)
@@ -71,7 +126,7 @@ def get_models():
 
 
 # ── Session init ──────────────────────────────────────────────────────────────
-for k, v in [("messages", []), ("persona", "analyst"), ("df", None), ("context", ""), ("cat_data", None)]:
+for k, v in [("messages", []), ("persona", "analyst"), ("ai_mode", "local"), ("df", None), ("context", ""), ("cat_data", None)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -90,6 +145,19 @@ with st.sidebar:
         ["analyst", "blackrock"],
         format_func=lambda x: "🔬 Finansanalytiker" if x == "analyst" else "🏦 BlackRock Rådgiver",
     )
+
+    st.divider()
+    st.session_state.ai_mode = st.radio(
+        "Analyse-type",
+        ["local", "claude"],
+        index=["local", "claude"].index(st.session_state.ai_mode),
+        format_func=lambda x: "🏠 Lokal (Ollama)" if x == "local" else "🔬 Dybdegående (Claude API)",
+    )
+    if st.session_state.ai_mode == "claude":
+        if os.getenv("ANTHROPIC_API_KEY"):
+            st.caption("✅ API-nøgle fundet")
+        else:
+            st.caption("⚠️ Ingen API-nøgle — tilføj til `.env`")
 
     st.divider()
     st.subheader("📂 Upload fil")
@@ -307,7 +375,12 @@ with tab3:
     else:
         system = BLACKROCK_SYSTEM if st.session_state.persona == "blackrock" else ANALYST_SYSTEM
         label  = "🏦 BlackRock Rådgiver" if st.session_state.persona == "blackrock" else "🔬 Finansanalytiker"
-        st.caption(f"Persona: **{label}** · Kører 100% lokalt via Ollama")
+        using_claude = st.session_state.ai_mode == "claude"
+        backend_label = "Claude API (Anthropic)" if using_claude else "Ollama (lokalt)"
+        st.caption(f"Persona: **{label}** · Backend: **{backend_label}**")
+
+        if using_claude:
+            st.info("📡 Claude API-tilstand: anonymiserede kategoridata sendes til Anthropic. Handelsnavne fjernes. Data slettes efter 7 dage.", icon="🔒")
 
         suggestions = {
             "analyst":   ["Hvad bruger jeg for meget på?", "Analysér mine abonnementer", "Hvad er min opsparingsrate?", "Find usædvanlige udgifter"],
@@ -327,14 +400,19 @@ with tab3:
             with st.chat_message("user"):
                 st.write(prompt)
 
-            seed = [
-                {"role": "user",      "content": f"Her er mine finansielle data:\n\n{st.session_state.context}"},
-                {"role": "assistant", "content": "Forstået. Jeg har læst dine data og er klar til at analysere."},
-            ]
-            with st.chat_message("assistant"):
-                with st.spinner("Analyserer..."):
-                    resp = ask_ollama(model, seed + st.session_state.messages, system=system)
-                st.write(resp)
+            if using_claude:
+                full_prompt = "\n\n".join(m["content"] for m in st.session_state.messages if m["role"] == "user")
+                with st.chat_message("assistant"):
+                    resp = st.write_stream(ask_claude_stream(full_prompt, system, st.session_state.context))
+            else:
+                seed = [
+                    {"role": "user",      "content": f"Her er mine finansielle data:\n\n{st.session_state.context}"},
+                    {"role": "assistant", "content": "Forstået. Jeg har læst dine data og er klar til at analysere."},
+                ]
+                with st.chat_message("assistant"):
+                    with st.spinner("Analyserer..."):
+                        resp = ask_ollama(model, seed + st.session_state.messages, system=system)
+                    st.write(resp)
             st.session_state.messages.append({"role": "assistant", "content": resp})
 
         if st.session_state.messages:
@@ -344,15 +422,31 @@ with tab3:
 
 # ── TAB 4 ─────────────────────────────────────────────────────────────────────
 with tab4:
-    st.subheader("🗺️ BlackRock Livs-Finansielt Roadmap")
     profile = load_profile()
     if not profile:
-        st.warning("Udfyld din profil under ⚙️ Profil & Rapporter for at generere dit personlige roadmap.")
+        st.warning("Udfyld din profil under ⚙️ Profil & Rapporter for at generere analyser.")
     else:
         st.markdown(f"**Profil:** Alder {profile.get('age','?')} · {profile.get('income','?')} DKK/md · Formue {profile.get('net_worth','?')} DKK")
-        if st.button("🏦 Generer mit BlackRock Livs-Roadmap", type="primary"):
-            ctx = (build_context(df, profile) if df is not None else "") + build_balance_sheet_context(profile)
-            roadmap_prompt = f"""Lav et komplet livslang finansielt roadmap.
+
+        tab4_mode = st.radio(
+            "Vælg analyse",
+            ["blackrock", "goldman", "morgan", "wealthfront"],
+            format_func=lambda x: {
+                "blackrock":   "🏦 BlackRock Livs-Roadmap",
+                "goldman":     "💼 Goldman Sachs Wealth Diagnostic",
+                "morgan":      "📈 Morgan Stanley Portfolio Architect",
+                "wealthfront": "🏠 Wealthfront Real Estate Analyzer",
+            }[x],
+            horizontal=True,
+        )
+
+        # ── BlackRock Livs-Roadmap (Ollama) ───────────────────────────────────
+        if tab4_mode == "blackrock":
+            st.subheader("🗺️ BlackRock Livs-Finansielt Roadmap")
+            st.caption("Kører 100% lokalt via Ollama")
+            if st.button("🏦 Generer mit BlackRock Livs-Roadmap", type="primary"):
+                ctx = (build_context(df, profile) if df is not None else "") + build_balance_sheet_context(profile)
+                roadmap_prompt = f"""Lav et komplet livslang finansielt roadmap.
 
 {ctx}
 
@@ -370,13 +464,97 @@ with tab4:
 
 Brug konkrete DKK-tal. Inkluder folkepension (~14.000 DKK/md fra 67), ATP og arbejdsmarkedspension."""
 
-            with st.spinner("BlackRock-rådgiveren bygger dit roadmap... (1-3 min)"):
-                roadmap = ask_ollama(model, [{"role": "user", "content": roadmap_prompt}], system=BLACKROCK_SYSTEM)
-            st.markdown(roadmap)
-            REPORTS.mkdir(parents=True, exist_ok=True)
-            rpath = REPORTS / f"roadmap_{datetime.now().strftime('%Y%m%d')}.md"
-            rpath.write_text(f"# BlackRock Livs-Roadmap\nGenereret: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n{roadmap}", encoding="utf-8")
-            st.success(f"Gemt: {rpath.name}")
+                with st.spinner("BlackRock-rådgiveren bygger dit roadmap... (1-3 min)"):
+                    roadmap = ask_ollama(model, [{"role": "user", "content": roadmap_prompt}], system=BLACKROCK_SYSTEM)
+                st.markdown(roadmap)
+                REPORTS.mkdir(parents=True, exist_ok=True)
+                rpath = REPORTS / f"roadmap_{datetime.now().strftime('%Y%m%d')}.md"
+                rpath.write_text(f"# BlackRock Livs-Roadmap\nGenereret: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n{roadmap}", encoding="utf-8")
+                st.success(f"Gemt: {rpath.name}")
+
+        # ── Claude API personas ────────────────────────────────────────────────
+        else:
+            _CLAUDE_PERSONAS = {
+                "goldman": {
+                    "title":   "💼 Goldman Sachs Wealth Diagnostic",
+                    "system":  GOLDMAN_SYSTEM,
+                    "prompt":  (
+                        "Lav en komplet Goldman Sachs Wealth Diagnostic med følgende sektioner:\n"
+                        "1. **Finansiel Helbredsscore (X/10)** med delscores for likviditet, gæld, opsparing, pension og forsikring\n"
+                        "2. **Kritiske svagheder** — de 3 vigtigste gaps med DKK-konsekvenser\n"
+                        "3. **Nettoformue-trajectory** — om 5, 10 og 20 år ved nuværende kurs vs. optimeret kurs\n"
+                        "4. **Prioriterede handlinger** (ranket efter DKK-impact): minimum 5 konkrete tiltag\n"
+                        "5. **Pensionsgab-analyse** — hvad mangler for at nå pensionsmålet?\n"
+                        "6. **Gælds-optimering** — optimal afviklingsrækkefølge baseret på renter\n"
+                        "7. **Forsikringsgab** — er brugeren under- eller overforsikret?\n\n"
+                        "Brug konkrete DKK-tal. Inkluder dansk kontekst: folkepension, ATP, boligmarked KBH."
+                    ),
+                    "portfolio": False,
+                },
+                "morgan": {
+                    "title":   "📈 Morgan Stanley Portfolio Architect",
+                    "system":  MORGAN_SYSTEM,
+                    "prompt":  (
+                        "Lav en komplet Morgan Stanley Portefølje-Arkitektur-analyse:\n"
+                        "1. **Nuværende allokering vs. optimal** for alder, mål og tidshorisont (angiv anbefalede %)\n"
+                        "2. **Geografisk eksponering** — er brugeren overeksponeret mod USA, Europa eller EM?\n"
+                        "3. **ETF-omkostningsanalyse** — kan der spares med billigere alternativer? (angiv TER-tal)\n"
+                        "4. **Rebalancerings-plan** — hvornår og hvad skal justeres?\n"
+                        "5. **Risikoprofil** — passer allokeringen til pensionsalder og mål?\n"
+                        "6. **Konkrete anbefalinger** — præcist hvad skal købes/sælges/ændres og i hvilken rækkefølge\n\n"
+                        "Brug ETF-navne og ISIN-koder hvor relevant. Angiv procentsatser præcist."
+                    ),
+                    "portfolio": True,
+                },
+                "wealthfront": {
+                    "title":   "🏠 Wealthfront Real Estate Analyzer",
+                    "system":  WEALTHFRONT_SYSTEM,
+                    "prompt":  (
+                        "Lav en komplet Wealthfront Real Estate-analyse for denne bruger:\n"
+                        "1. **Finansiel parathed** — kan brugeren bære et boligkøb i KBH? Beregn maks. lånebehov og månedlig ydelse\n"
+                        "2. **Cash-on-cash return** — beregn forventet afkast på ejendomsinvestering vs. ETF-portefølje\n"
+                        "3. **Køb vs. leje** — 10-årig sammenligning med realistiske KBH-priser og lejepriser\n"
+                        "4. **Alternativomkostning** — hvad vokser udbetaling + månedlig forskel til i ETF-markedet?\n"
+                        "5. **Optimal timing** — hvornår giver det mening at købe (alder, formue, gæld)?\n"
+                        "6. **Klar anbefaling**: Køb nu / Vent X år / Fortsæt med at leje — med præcis begrundelse\n\n"
+                        "Brug realistiske KBH-kvadratmeterpriser (ca. 50.000-70.000 DKK/m²). Angiv konkrete tal."
+                    ),
+                    "portfolio": False,
+                },
+            }
+
+            cfg = _CLAUDE_PERSONAS[tab4_mode]
+            st.subheader(cfg["title"])
+            st.info(
+                "📡 **Claude API**: Sender anonymiserede kategoridata til Anthropic (ingen handelsnavne, "
+                "ingen kontonumre). Data slettes efter 7 dage og bruges ikke til træning.",
+                icon="🔒",
+            )
+
+            confirmed = st.checkbox("Jeg accepterer at sende anonymiserede finansdata til Claude API")
+            if st.button(f"🔬 Generer {cfg['title']}", type="primary", disabled=not confirmed):
+                ctx = (
+                    (build_context(df, profile) if df is not None else "")
+                    + build_balance_sheet_context(profile)
+                )
+                if cfg["portfolio"]:
+                    from nordea_parser import build_portfolio_context
+                    portfolio = load_portfolio()
+                    if portfolio:
+                        ctx += build_portfolio_context(portfolio)
+                    else:
+                        st.warning("Ingen portfolio.json fundet — upload Saxo PDF under ⚙️ for fuld portefølje-analyse.")
+
+                result = st.write_stream(ask_claude_stream(cfg["prompt"], cfg["system"], ctx))
+                if result and not result.startswith("❌"):
+                    REPORTS.mkdir(parents=True, exist_ok=True)
+                    slug = tab4_mode
+                    rpath = REPORTS / f"{slug}_{datetime.now().strftime('%Y%m%d')}.md"
+                    rpath.write_text(
+                        f"# {cfg['title']}\nGenereret: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n{result}",
+                        encoding="utf-8",
+                    )
+                    st.success(f"Gemt: {rpath.name}")
 
 # ── TAB 5 ─────────────────────────────────────────────────────────────────────
 with tab5:
