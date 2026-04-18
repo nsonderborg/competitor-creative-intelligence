@@ -198,6 +198,7 @@ with st.sidebar:
     if all_df is not None:
         cat_data = load_categories(CONFIG_DIR)
         all_df   = recategorize(all_df, cat_data["rules"], cat_data.get("overrides", {}))
+        all_df["dato"] = pd.to_datetime(all_df["dato"], errors="coerce")
         _profile = load_profile() or {}
         st.session_state.df       = all_df
         st.session_state.cat_data = cat_data

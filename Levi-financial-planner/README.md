@@ -1,346 +1,297 @@
-# Nordea Finansiel Cockpit
+# Levi — Personal Finance OS
 
-> **Claude Code handoff document.** This README is written so Claude Code can clone this repo, understand the full system, generate test data, run all components, and verify correctness — without access to real bank data.
+A fully local personal finance system for Danish bank accounts and investment portfolios. Parses real bank exports, categorises spending, tracks budgets, runs AI analysis via a local LLM, and syncs curated summaries to Notion — with no raw transaction data ever leaving your machine.
 
----
-
-## What this is
-
-A 100% local AI-powered personal finance dashboard for Nordea bank data. No cloud. No API keys. Data never leaves the machine. Two entry points:
-
-- `app.py` — Streamlit web dashboard (upload files, chat with AI, view charts)
-- `generate_report.py` — CLI script for cron-scheduled reports
-
-AI inference runs via [Ollama](https://ollama.com) (local LLM server). The app works without Ollama running — it just degrades gracefully on the AI chat features.
+> **Planned:** Revolut CSV support (same `_normalise()` pipeline, format profile extension only — no architectural change needed).
 
 ---
 
-## Repository layout
+## What Levi does
 
 ```
-nordea_suite/
-├── app.py                  ← Streamlit dashboard (main entry point)
-├── generate_report.py      ← Cron CLI (shares parser logic with app.py)
-├── README.md               ← This file
-├── data/
-│   ├── inbox/              ← Drop new files here; scan moves them to processed/
-│   ├── processed/          ← Parsed and deduplicated source files (do not edit)
-│   └── reports/            ← AI-generated .md reports written here
-└── config/
-    └── profile.json        ← User financial profile (created on first save)
+Bank exports (CSV / .numbers / PDF)
+        │
+        ▼  Parse & normalise
+        │  Nordea CSV · Nordea Numbers · Saxo Bank PDF · Saxo Numbers
+        │
+        ▼  Categorise & deduplicate
+        │  Keyword rules + per-transaction overrides (persisted in config/)
+        │
+        ▼  Analyse
+        │  Streamlit dashboard · CLI reports · Local Ollama LLM · Claude API (opt-in)
+        │
+        ▼  Output
+           Streamlit UI · Markdown reports · Notion database row · Notion dashboard
 ```
 
-All directories are created automatically on first run. Nothing breaks if they are empty.
+---
+
+## Inputs
+
+| Source | Formats | How |
+|---|---|---|
+| Nordea bank statement | `.csv`, `.numbers` | Drop into `data/inbox/`, click Scan in sidebar |
+| Saxo Bank portfolio report | `.pdf` | Upload in Tab 5 |
+| Saxo Bank account statement | `.numbers` | Drop into `data/inbox/` |
+| User profile | Form in Tab 5 | Age, income, goals, savings target |
+| Balance sheet | Form in Tab 5 | Assets, liabilities, insurance, pension |
+| Budget targets | Form in Tab 5 | Per-category monthly limits in DKK |
+| Category rules | Inline editor in Tab 2 | Keyword rules + per-row overrides |
 
 ---
 
-## Input data schema
+## Transformation pipeline
 
-The app accepts two file formats, both describing the same schema.
+### 1. Parse — `nordea_parser.py: parse_any()`
 
-### Format A — Apple Numbers (.numbers)
+- **Nordea CSV** — encoding detection (UTF-8 / latin-1), semicolon separator, Danish amount format (`1.234,56 → 1234.56`)
+- **Nordea / Saxo Numbers** — `numbers_parser.Document`, Sheet 1, column mapping
+- **Saxo PDF** — `pypdf`, pages 2/4/5/6/8: account metadata, total YTD return %, monthly returns, per-ETF returns, holdings (ISIN, weight %, EUR prices, EUR→DKK rate), cost ratio %. Writes `config/portfolio.json`.
 
-Exported directly from the Numbers mockup. The parser uses `numbers-parser` to read the first sheet, first table. Headers are in row 0.
+### 2. Normalise — `_normalise(df)`
 
-### Format B — CSV (.csv or .txt)
+- Renames columns to canonical names (`dato`, `beløb`, `label`, …)
+- Detects `"Reserveret"` (pending) rows → `reserveret=True`, date = NaT
+- Assigns transaction type (`Indkomst` / `Udgift`)
+- Runs initial keyword categorisation
+- Saved to `data/processed/<timestamp>_<name>`
 
-Semicolon-separated (`;`), Danish encoding (latin-1 or UTF-8). Exported from Nordea Netbank via the CSV button on the Transactions page.
+### 3. Merge & deduplicate — `load_all_processed()`
 
-### Canonical column names (both formats)
+Merges all processed files, deduplicates on `(dato, beløb, label)`. Multiple files covering overlapping periods are safe.
 
-| Raw header (Nordea) | Internal name | Type | Notes |
-|---------------------|--------------|------|-------|
-| `Bogføringsdato` | `dato` | date | Format `YYYY/MM/DD` or `YYYY-MM-DD`. The literal string `"Reserveret"` marks a pending transaction not yet booked. |
-| `Beløb` | `beløb` | float | Danish number format: thousands separator `.`, decimal separator `,`. Negative = debit (money out). Positive = credit (money in). |
-| `Afsender` | `afsender` | str | Populated when money is received (sender's name/account). Empty on debits. |
-| `Modtager` | `modtager` | str | Populated when money is sent (recipient's name/account). Empty on credits. |
-| `Navn` | `navn` | str | Merchant or counterparty display name. Primary categorisation signal. |
-| `Beskrivelse` | `beskrivelse` | str | Transaction description. Often same as Navn. Secondary categorisation signal. |
-| `Saldo` | `saldo` | float | Running account balance after transaction. Same Danish number format as Beløb. |
-| `Valuta` | `valuta` | str | Always `DKK` in practice. |
-| `Afstemt` | `afstemt` | str | Reconciliation flag. **Not populated in the observation period.** Always empty/null in current data — do not rely on it. |
+### 4. Categorise — `recategorize(df, rules, overrides)`
 
-### Derived columns (added by the parser)
+1. **Overrides** — exact per-row assignments, keyed `YYYY-MM-DD||beløb||label`
+2. **Keyword rules** — substring match across `navn`, `beskrivelse`, `modtager`, `afsender`
+3. **Fallback** — `Andet`
 
-| Column | Values | Description |
-|--------|--------|-------------|
-| `reserveret` | bool | True when `Bogføringsdato == "Reserveret"` |
-| `type` | `"Indkomst"` / `"Udgift"` | Derived from sign of `beløb` |
-| `label` | str | Best display name: `navn` → `beskrivelse` → `modtager`/`afsender` |
-| `kategori` | str | Rule-based category from keyword matching on `navn + beskrivelse + modtager + afsender` |
+Rules and overrides persist in `config/categories.json`.
 
-### Edge cases the parser must handle
+### 5. Context building
 
-1. **Reserveret rows** — `Bogføringsdato` = literal string `"Reserveret"`, `Beløb` is NaN (amount not yet confirmed). Tag with `reserveret=True`, set `dato=NaT`, exclude from all financial calculations but keep in dataframe for display.
-2. **Trailing empty column** — the Numbers export has an unnamed 10th column (`col_9`). Ignore it.
-3. **Danish number formatting** — `1.234,56` must parse to `1234.56`. The cleaner strips `.` (thousands) then replaces `,` with `.` (decimal).
-4. **Multiple files** — processed/ may contain multiple files covering overlapping periods. Deduplication key is `(dato, beløb, label)`.
-5. **Encoding** — try `utf-8` first, then `latin-1`, `cp1252`, `iso-8859-1`. Most Nordea exports are latin-1.
-6. **Afstemt column** — always null in current data. Parser must not fail if it is missing entirely.
+Three functions compose the AI prompt context:
+
+| Function | Content | Privacy |
+|---|---|---|
+| `build_context()` | KPIs, category totals, TOP 10 merchants, budget status | Full DKK — local only |
+| `build_balance_sheet_context()` | Assets, liabilities, insurance, pension | Full DKK — local only |
+| `build_portfolio_context()` | Holdings as % and EUR prices only | Safe for Claude API |
+
+Merchant-level detail (`TOP 10 UDGIFTER` section) is stripped before any Claude API call via `_strip_merchant_names()`.
 
 ---
 
-## Generating synthetic test data
+## Outputs
 
-Claude Code should generate a synthetic `.numbers`-compatible CSV for testing without real bank data. Create `data/inbox/test_data.csv` with this structure:
+### Streamlit app — `streamlit run app.py`
 
-```python
-# generate_test_data.py — run this to create synthetic test data
-import csv
-import random
-from datetime import date, timedelta
-from pathlib import Path
+| Tab | Content |
+|---|---|
+| **1 Dashboard** | Income / expenses / net / savings rate metrics; category bar chart; budget progress bars (green <80 %, yellow 80–100 %, red >100 %) |
+| **2 Transaktioner** | Filterable table (category, type, date range, Afstemt); inline category reassignment; keyword rule editor; reconciliation checkboxes (auto-saved) |
+| **3 AI Chat** | Local Ollama (Finansanalytiker) or Claude API (opt-in, sidebar toggle) — full conversation, context-seeded |
+| **4 Livs-Roadmap** | **BlackRock** (Ollama, long-horizon plan) · **Goldman Sachs** (Claude API, wealth diagnostic) · **Morgan Stanley** (Claude API, portfolio architect) · **Wealthfront** (Claude API, real estate analyser) — Claude personas behind explicit confirmation checkboxes |
+| **5 Profil & Rapporter** | Profile form; balance sheet form; budget targets; Saxo PDF uploader; local report viewer |
 
-Path("data/inbox").mkdir(parents=True, exist_ok=True)
+Sidebar shows live API key status and Ollama model selector.
 
-merchants = [
-    ("REMA 1000 AMAGER", "Dagligvarer", -350),
-    ("DSB", "Transport", -98),
-    ("Netflix", "Abonnementer", -109),
-    ("Spotify", "Abonnementer", -109),
-    ("FLEXII", "Abonnementer", -199),     # this one also appears as Reserveret
-    ("Vinted", "Shopping", -0),           # Vinted can be income (selling) or expense
-    ("ROEDE KORS BUTIK", "Shopping", -85),
-    ("TIPSTER.DK", "Shopping", -199),
-    ("Zone Fitness", "Sundhed & Fitness", -299),
-    ("MobilePay", "MobilePay", -500),
-    ("Løn Kereby Aps", "Løn & Indkomst", 35000),
-    ("Netto Amager", "Dagligvarer", -220),
-    ("Starbucks", "Restaurant & Café", -65),
-    ("Uber", "Transport", -145),
-    ("Amazon", "Shopping", -399),
-]
-
-rows = []
-# Header
-rows.append(["Bogføringsdato", "Beløb", "Afsender", "Modtager", "Navn", "Beskrivelse", "Saldo", "Valuta", "Afstemt", ""])
-
-# One Reserveret row
-rows.append(["Reserveret", "", "", "", "", "FLEXII", "", "DKK", "", ""])
-
-# ~50 transactions from 2026-02-27 to today
-saldo = 42000.0
-start = date(2026, 2, 27)
-end   = date(2026, 4, 17)
-delta = (end - start).days
-
-for i in range(50):
-    d = start + timedelta(days=random.randint(0, delta))
-    navn, _, base_amount = random.choice(merchants)
-    # Randomise amount slightly
-    amount = round(base_amount * random.uniform(0.8, 1.2), 2)
-    saldo  = round(saldo + amount, 2)
-    afsender = "Nikolas Nogueira" if amount > 0 else ""
-    modtager = navn if amount < 0 else ""
-    # Format as Danish: 1234.56 → "1.234,56"
-    def fmt(n):
-        return f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    rows.append([
-        d.strftime("%Y/%m/%d"),
-        fmt(amount),
-        afsender,
-        modtager,
-        navn,
-        navn,
-        fmt(saldo),
-        "DKK",
-        "",
-        ""
-    ])
-
-with open("data/inbox/test_data.csv", "w", newline="", encoding="utf-8") as f:
-    writer = csv.writer(f, delimiter=";")
-    writer.writerows(rows)
-
-print(f"Written {len(rows)-2} transactions + 1 Reserveret row to data/inbox/test_data.csv")
-```
-
-Run with: `python generate_test_data.py`
-
----
-
-## Installation
+### CLI reports — `generate_report.py`
 
 ```bash
-# Requires Python 3.11+ (for the X | Y union type syntax in type hints)
-python3 --version
-
-# Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate          # macOS/Linux
-# venv\Scripts\activate           # Windows
-
-# Install all dependencies
-pip install streamlit pandas requests numbers-parser
-
-# Verify imports work
-python3 -c "import streamlit, pandas, requests; from numbers_parser import Document; print('OK')"
+python generate_report.py --type scan     # ingest data/inbox/ → data/processed/
+python generate_report.py --type weekly   # Ollama weekly summary → data/reports/
+python generate_report.py --type monthly  # Ollama monthly diagnostic → data/reports/
+python generate_report.py --type all      # scan + weekly + monthly
+python generate_report.py --model qwen2.5:7b --type monthly
 ```
 
-### Ollama (required for AI features, optional for testing the parser/dashboard)
+Markdown output to `data/reports/`. Cron-ready (no interactive dependencies).
+
+### Notion sync — `sync_to_notion.py`
 
 ```bash
-# Install Ollama (macOS)
+python sync_to_notion.py --type monthly [--dry-run] [--model qwen2.5:7b]
+python sync_to_notion.py --type weekly
+```
+
+Pushes one row per run to the Levi Notion database:
+
+| Column | Type | Source |
+|---|---|---|
+| Måned | Date | local |
+| Indkomst | Number | local df |
+| Udgifter | Number | local df |
+| Opsparingsrate | Number % | local df |
+| Afkast YTD | Number % | local portfolio.json |
+| Porteføljeværdi | Number | local profile.json (manual) |
+| Budget-status | Select (På sporet / Marginal / Overskred) | computed locally |
+| Ollama-analyse | Rich text | local Ollama output |
+| Handlinger | Rich text | A1/A2/A3 lines extracted from analysis |
+
+Also saves analysis locally to `data/reports/notion_monthly_YYYYMM.md`.
+
+### Notion dashboard — `create_notion_dashboard.py`
+
+```bash
+python create_notion_dashboard.py          # create or refresh in-place
+python create_notion_dashboard.py --force  # force new page
+```
+
+Reads the last 6 Notion DB entries + `config/portfolio.json` and writes a styled Notion page:
+
+- **Goldman Sachs Wealth Diagnostic** — 3-column KPI cards (Indkomst / Udgifter / Opsparingsrate), 2-column row (Netto opsparing / Budget-status emoji-coded), Ollama analysis callout, A1/A2/A3 action bullets
+- **Morgan Stanley Portfolio Architect** — portfolio value / YTD return cards, holdings table (name / weight % / YTD return % / EUR price), monthly returns bar chart
+- **Historical table** — last 6 months, all key metrics
+
+Page ID cached in `.env` as `NOTION_DASHBOARD_PAGE_ID` — URL stays permanent across monthly updates.
+
+---
+
+## Recommended monthly workflow
+
+```bash
+# 1. Export Nordea CSV and/or Saxo PDF → drop into data/inbox/
+
+# 2. Ingest
+python generate_report.py --type scan
+
+# 3. Review in UI — recategorise, reconcile, check budgets
+streamlit run app.py
+
+# 4. Generate local report
+python generate_report.py --type monthly
+
+# 5. Push to Notion
+python sync_to_notion.py --type monthly
+python create_notion_dashboard.py
+```
+
+---
+
+## Privacy model
+
+| Layer | Sees | Never sees |
+|---|---|---|
+| Local machine | Everything | — |
+| Ollama (localhost) | Full context incl. DKK amounts | Never leaves the machine |
+| Claude API (opt-in, Tab 3/4 only) | Category %, portfolio %, profile text | Absolute DKK, merchant names, account IDs |
+| Notion | Curated DKK figures + Ollama text | Raw transactions, merchant names |
+
+Claude API is strictly opt-in and requires an explicit per-call confirmation in the UI. Raw transaction data never leaves your machine.
+
+---
+
+## Setup
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Install and start Ollama
 brew install ollama
-# or: curl -fsSL https://ollama.com/install.sh | sh
-
-# Start server (keep this terminal open or run as background service)
+ollama pull qwen2.5:7b
 ollama serve
 
-# Pull a model — qwen2.5:7b is recommended for Danish + numbers
-ollama pull qwen2.5:7b
+# 3. Configure
+cp .env.example .env   # or create .env manually (see keys below)
 
-# Verify
-curl http://localhost:11434/api/tags
-```
+# 4. Generate synthetic test data (optional)
+python generate_test_data.py
+python generate_report.py --type scan
 
-The dashboard and CLI degrade gracefully if Ollama is not running — the parser, charts, and transaction table work without it. Only the AI Chat tab and report generation require it.
-
----
-
-## Running the app
-
-```bash
-# Activate venv first
-source venv/bin/activate
-
-# Start dashboard
+# 5. Launch
 streamlit run app.py
-# Opens at http://localhost:8501
+```
 
-# Run CLI report generator
-python generate_report.py --type scan      # move inbox files to processed/
-python generate_report.py --type monthly   # generate monthly .md report
-python generate_report.py --type weekly    # generate weekly .md report
-python generate_report.py --type all       # scan + weekly + monthly
-python generate_report.py --model qwen2.5:7b --type monthly  # specify model explicitly
+### `.env` keys
+
+```
+NOTION_INTEGRATION_KEY=ntn_xxx       # Notion internal integration token
+NOTION_DB_ID=xxx                     # Levi database ID (from Notion URL)
+ANTHROPIC_API_KEY=sk-ant-xxx         # Optional — Claude API personas only
+NOTION_WEEKLY_DB_ID=xxx              # Optional — falls back to NOTION_DB_ID
+NOTION_DASHBOARD_PAGE_ID=xxx         # Auto-set by create_notion_dashboard.py
 ```
 
 ---
 
-## Acceptance criteria for Claude Code
+## File structure
 
-When testing, verify these behaviours:
-
-### Parser
-- [ ] `parse_any("data/inbox/test_data.csv", "test_data.csv")` returns a DataFrame with columns: `dato`, `beløb`, `afsender`, `modtager`, `navn`, `beskrivelse`, `saldo`, `valuta`, `afstemt`, `reserveret`, `type`, `label`, `kategori`
-- [ ] The `Reserveret` row has `reserveret=True` and `dato=NaT`
-- [ ] All non-reserved rows have `dato` as proper `datetime64`
-- [ ] `beløb` is `float64`, correctly signed (negative for debits)
-- [ ] `type` == `"Indkomst"` for positive beløb, `"Udgift"` for negative
-- [ ] `kategori` is populated for known merchants (e.g. "Netflix" → "Abonnementer", "REMA 1000" → "Dagligvarer")
-- [ ] `label` is non-null for all rows
-- [ ] Danish amounts like `"1.234,56"` parse to `1234.56`
-- [ ] Uploading the same file twice does not double-count (deduplication on `dato + beløb + label`)
-
-### Dashboard (manual verification)
-- [ ] Uploading `test_data.csv` via the file uploader shows a success message with correct transaction count
-- [ ] Dashboard tab shows 5 metric cards with valid numbers (no NaN, no divide-by-zero)
-- [ ] Reserveret row appears in the info banner, not in financial totals
-- [ ] Category bar chart renders without error
-- [ ] Transaction tab filter by "Reserveret" shows only the reserved row
-- [ ] Transaction tab search for "Netflix" returns only Netflix rows
-
-### CLI
-- [ ] `python generate_report.py --type scan` with test_data.csv in inbox/ moves the file to processed/ and logs success
-- [ ] `python generate_report.py --type monthly` (with Ollama running) writes a .md file to `data/reports/`
-- [ ] `python generate_report.py --type monthly` (without Ollama) exits with a clear error message, not a crash
-- [ ] `python generate_report.py --type all` runs scan + weekly + monthly in sequence
-
-### Profile
-- [ ] Saving a profile writes `config/profile.json` with correct keys: `age`, `income`, `net_worth`, `family`, `career`, `goals`, `freedom`
-- [ ] Profile is loaded and appended to the context string sent to Ollama
+```
+Levi-financial-planner/
+├── app.py                      # Streamlit UI (5 tabs + sidebar)
+├── nordea_parser.py            # Shared parser + context library
+├── generate_report.py          # CLI cron: ingest + weekly/monthly reports
+├── sync_to_notion.py           # CLI cron: push data + Ollama analysis to Notion DB
+├── create_notion_dashboard.py  # CLI: build/refresh GS+MS Notion dashboard page
+├── generate_test_data.py       # CLI: emit synthetic transactions for dev/testing
+├── requirements.txt
+├── pytest.ini
+├── config/                     # Gitignored, created at runtime
+│   ├── profile.json            # User profile, budgets, balance sheet
+│   ├── categories.json         # {rules: {…}, overrides: {…}}
+│   └── portfolio.json          # Saxo snapshot (written by parse_saxo_pdf)
+├── data/
+│   ├── inbox/                  # Drop zone — moved to processed/ on scan
+│   ├── processed/              # Parsed DataFrames (source of truth)
+│   └── reports/                # Generated Markdown + Notion reports
+└── tests/
+    └── test_parser.py          # 36 unit tests
+```
 
 ---
 
 ## Cron setup (macOS)
 
-macOS cron does not inherit your shell environment. Always use absolute paths.
-
-```bash
-# Find your venv Python path
-which python   # while venv is active — copy this exact path
-
-# Edit crontab
-crontab -e
-```
-
-Add these lines (replace `/Users/nikolas/projects/nordea_suite` with your actual path):
-
 ```cron
-# Daily inbox scan — 09:00
-0 9 * * * /Users/nikolas/projects/nordea_suite/venv/bin/python /Users/nikolas/projects/nordea_suite/generate_report.py --type scan >> /Users/nikolas/projects/nordea_suite/data/reports/cron.log 2>&1
+# Ingest inbox daily at 09:00
+0 9 * * *   /path/to/python /path/to/generate_report.py --type scan
 
 # Weekly summary — Monday 07:30
-30 7 * * 1 /Users/nikolas/projects/nordea_suite/venv/bin/python /Users/nikolas/projects/nordea_suite/generate_report.py --type weekly >> /Users/nikolas/projects/nordea_suite/data/reports/cron.log 2>&1
+30 7 * * 1  /path/to/python /path/to/generate_report.py --type weekly
 
-# Monthly report — 1st of month 08:00
-0 8 1 * * /Users/nikolas/projects/nordea_suite/venv/bin/python /Users/nikolas/projects/nordea_suite/generate_report.py --type monthly >> /Users/nikolas/projects/nordea_suite/data/reports/cron.log 2>&1
+# Monthly: report + Notion sync on 1st at 08:00 / 08:30 / 08:45
+0 8 1 * *   /path/to/python /path/to/generate_report.py --type monthly
+30 8 1 * *  /path/to/python /path/to/sync_to_notion.py --type monthly
+45 8 1 * *  /path/to/python /path/to/create_notion_dashboard.py
 ```
 
-**macOS-specific gotcha:** macOS requires explicit Full Disk Access for cron on Ventura/Sonoma. Go to System Settings → Privacy & Security → Full Disk Access → add `/usr/sbin/cron`.
+macOS requires Full Disk Access for cron (System Settings → Privacy & Security → Full Disk Access → add `/usr/sbin/cron`).
 
-Test a cron entry manually before relying on the schedule:
+---
+
+## Running tests
 
 ```bash
-# Simulate exactly what cron would run (no venv activation, no shell aliases)
-/Users/nikolas/projects/nordea_suite/venv/bin/python /Users/nikolas/projects/nordea_suite/generate_report.py --type scan
+python -m pytest tests/ -v   # 36 tests: _clean_amount, categorize, _normalise, parse_csv_file
 ```
 
 ---
 
-## Exporting from Nordea Netbank
+## Exporting from Nordea
 
 1. Log in at netbank.nordea.dk
 2. Go to **Transaktioner & detaljer** for the account
-3. Click the **CSV** button next to Udskriv
-4. Save the file to `data/inbox/`
-5. Either click "Scan inbox-mappe" in the sidebar, or run `python generate_report.py --type scan`
+3. Click the **CSV** button → save to `data/inbox/`
+4. Run `python generate_report.py --type scan` or click Scan in the sidebar
 
-Repeat for each account separately. The deduplication logic handles overlapping date ranges across multiple files.
-
-The `.numbers` format from the mockup is also accepted directly — drag and drop into the upload widget.
+Repeat for each account. Deduplication handles overlapping date ranges across multiple files.
 
 ---
 
-## AI personas
-
-### 🔬 Finansanalytiker (default)
-System prompt focuses on short-term analysis: identifies overspending, flags anomalies, gives concrete DKK-denominated savings suggestions.
-
-### 🏦 BlackRock Chief Financial Planning Officer
-System prompt focuses on decade-scale planning: net worth milestones at age 30/40/50/60/70, financial independence number (using 3.5-4% SWR), investment evolution from aggressive growth to preservation, Danish pension context (folkepension ~14.000 DKK/md from age 67, ATP, arbejdsmarkedspension).
-
-Switch between personas in the sidebar. The BlackRock persona is also used for the Livs-Roadmap tab which generates a full written roadmap saved to `data/reports/`.
-
----
-
-## Privacy
-
-- All inference runs locally via Ollama — no data leaves the machine
-- Streamlit's telemetry can be disabled: add `[browser]\ngatherUsageStats = false` to `~/.streamlit/config.toml`
-- All files written to `data/` — nothing in system temp or cloud sync paths
-- Verify Ollama is not exposed externally: `curl http://YOUR_LOCAL_IP:11434/api/tags` should fail
-
----
-
-## Known limitations and future work
-
-- **Single account view** — no multi-account aggregation UI yet (files are merged in the backend but there is no per-account breakdown in the dashboard)
-- **No budget targets** — the dashboard shows actuals only; no way to set monthly category budgets and track against them
-- **Category editor** — categories are hardcoded keyword lists in both files; a UI to add/edit/reassign categories would be useful
-- **Afstemt field** — currently ignored; could be used to mark transactions as reconciled against receipts or invoices
-- **`.numbers` write-back** — the app reads `.numbers` files but cannot write back (e.g. to populate the Afstemt column)
-
----
-
-## Dependency versions (tested)
+## Dependencies
 
 ```
-python        >= 3.11
-streamlit     >= 1.32
-pandas        >= 2.0
-requests      >= 2.31
-numbers-parser >= 4.2
-ollama        >= 0.1.9  (server, not Python package)
+python          >= 3.11
+streamlit       >= 1.32
+pandas          >= 2.0
+requests        >= 2.31
+numbers-parser  >= 4.2
+pypdf           >= 4.0
+anthropic       >= 0.40
+python-dotenv   >= 1.0
+notion-client   >= 2.0
+pytest          >= 7.0
+ollama                    (local server — brew install ollama)
 ```
