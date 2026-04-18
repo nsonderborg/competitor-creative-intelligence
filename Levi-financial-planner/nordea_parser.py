@@ -116,6 +116,27 @@ def save_categories(config_dir: Path, data: dict):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def load_reconciled(config_dir: Path) -> dict:
+    """Load reconciliation state from config/reconciled.json.
+
+    Keys use _override_key format: 'YYYY-MM-DD||beløb||label'.
+    Values are booleans (True = transaction has been reviewed/reconciled).
+    """
+    rec_file = config_dir / "reconciled.json"
+    if rec_file.exists():
+        with open(rec_file, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_reconciled(config_dir: Path, data: dict):
+    """Persist reconciliation state to config/reconciled.json."""
+    rec_file = config_dir / "reconciled.json"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    with open(rec_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
 def _normalise(df: pd.DataFrame) -> pd.DataFrame | None:
     """Map raw Nordea columns → canonical schema, handle Reserveret rows, parse types."""
     rename = {}

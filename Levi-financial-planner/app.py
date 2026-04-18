@@ -14,6 +14,7 @@ load_dotenv()
 from nordea_parser import (
     parse_any, load_all_processed, build_context, build_balance_sheet_context,
     load_categories, save_categories, recategorize,
+    load_reconciled, save_reconciled,
 )
 
 st.set_page_config(page_title="Finansiel Cockpit", page_icon="📊", layout="wide")
@@ -285,10 +286,13 @@ with tab2:
     if df is None:
         st.info("Ingen data endnu.")
     else:
-        c1, c2, c3 = st.columns(3)
-        ftype   = c1.selectbox("Type", ["Alle", "Indkomst", "Udgift", "Reserveret"])
-        fcat    = c2.selectbox("Kategori", ["Alle"] + sorted(df["kategori"].dropna().unique().tolist()))
-        fsearch = c3.text_input("Søg (navn/beskrivelse)")
+        reconciled = load_reconciled(CONFIG_DIR)
+
+        c1, c2, c3, c4 = st.columns([2, 2, 3, 2])
+        ftype    = c1.selectbox("Type", ["Alle", "Indkomst", "Udgift", "Reserveret"])
+        fcat     = c2.selectbox("Kategori", ["Alle"] + sorted(df["kategori"].dropna().unique().tolist()))
+        fsearch  = c3.text_input("Søg (navn/beskrivelse)")
+        fafstemt = c4.radio("Afstemt", ["Alle", "Ja", "Nej"], horizontal=True)
 
         filt = df.copy()
         if ftype == "Reserveret":
@@ -301,12 +305,54 @@ with tab2:
         if fsearch:
             filt = filt[filt["label"].str.contains(fsearch, case=False, na=False)]
 
-        disp = filt[["dato", "label", "afsender", "modtager", "beløb", "saldo", "kategori", "valuta"]].copy()
-        disp["dato"]  = disp["dato"].dt.strftime("%d/%m/%Y").fillna("Reserveret")
-        disp["beløb"] = disp["beløb"].map(lambda x: f"{x:+,.2f}")
-        disp["saldo"] = disp["saldo"].map(lambda x: f"{x:,.2f}" if pd.notna(x) else "")
-        disp.columns  = ["Dato", "Navn/Beskrivelse", "Afsender", "Modtager", "Beløb", "Saldo", "Kategori", "Valuta"]
-        st.dataframe(disp, use_container_width=True, hide_index=True)
+        # Align index for data_editor mapping
+        filt = filt.reset_index(drop=True)
+
+        def _row_key(r):
+            dato_str = r["dato"].strftime("%Y-%m-%d") if pd.notna(r["dato"]) else "NaT"
+            return f"{dato_str}||{r['beløb']}||{r['label']}"
+
+        keys = filt.apply(_row_key, axis=1)
+
+        # Apply Afstemt filter
+        if fafstemt != "Alle":
+            want = fafstemt == "Ja"
+            mask = keys.map(lambda k: bool(reconciled.get(k, False)) == want)
+            filt = filt[mask].reset_index(drop=True)
+            keys = keys[mask].reset_index(drop=True)
+
+        # Build editor DataFrame — Afstemt is the only editable column
+        editor_df = pd.DataFrame({
+            "✓": keys.map(lambda k: bool(reconciled.get(k, False))),
+            "Dato": filt["dato"].dt.strftime("%d/%m/%Y").fillna("Reserveret"),
+            "Navn/Beskrivelse": filt["label"].astype(str),
+            "Afsender": filt["afsender"].fillna(""),
+            "Modtager": filt["modtager"].fillna(""),
+            "Beløb": filt["beløb"].map(lambda x: f"{x:+,.2f}"),
+            "Saldo": filt["saldo"].map(lambda x: f"{x:,.2f}" if pd.notna(x) else ""),
+            "Kategori": filt["kategori"].fillna(""),
+            "Valuta": filt["valuta"].fillna(""),
+        })
+
+        edited = st.data_editor(
+            editor_df,
+            column_config={"✓": st.column_config.CheckboxColumn("✓", default=False, width="small")},
+            disabled=["Dato", "Navn/Beskrivelse", "Afsender", "Modtager", "Beløb", "Saldo", "Kategori", "Valuta"],
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        # Auto-save any checkbox changes (no explicit save button needed)
+        new_rec = dict(reconciled)
+        any_changed = False
+        for i in editor_df.index:
+            k = keys.iloc[i]
+            new_val = bool(edited.iloc[i]["✓"])
+            if reconciled.get(k, False) != new_val:
+                new_rec[k] = new_val
+                any_changed = True
+        if any_changed:
+            save_reconciled(CONFIG_DIR, new_rec)
 
         # ── Category editor ───────────────────────────────────────────────────
         cat_data = st.session_state.cat_data or load_categories(CONFIG_DIR)
