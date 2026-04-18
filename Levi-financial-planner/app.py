@@ -6,7 +6,10 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from nordea_parser import parse_any, load_all_processed, build_context
+from nordea_parser import (
+    parse_any, load_all_processed, build_context,
+    load_categories, save_categories, recategorize,
+)
 
 st.set_page_config(page_title="Finansiel Cockpit", page_icon="📊", layout="wide")
 
@@ -14,7 +17,8 @@ BASE_DIR     = Path(__file__).parent
 INBOX        = BASE_DIR / "data/inbox"
 PROCESSED    = BASE_DIR / "data/processed"
 REPORTS      = BASE_DIR / "data/reports"
-PROFILE_FILE = BASE_DIR / "config/profile.json"
+CONFIG_DIR   = BASE_DIR / "config"
+PROFILE_FILE = CONFIG_DIR / "profile.json"
 OLLAMA_URL   = "http://localhost:11434/api/chat"
 
 BLACKROCK_SYSTEM = """Du er Chief Financial Planning Officer hos BlackRock med 30 års erfaring i livslange finansielle roadmaps.
@@ -67,7 +71,7 @@ def get_models():
 
 
 # ── Session init ──────────────────────────────────────────────────────────────
-for k, v in [("messages", []), ("persona", "analyst"), ("df", None), ("context", "")]:
+for k, v in [("messages", []), ("persona", "analyst"), ("df", None), ("context", ""), ("cat_data", None)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -123,8 +127,11 @@ with st.sidebar:
 
     all_df = load_all_processed(PROCESSED)
     if all_df is not None:
-        st.session_state.df      = all_df
-        st.session_state.context = build_context(all_df, load_profile() or None)
+        cat_data = load_categories(CONFIG_DIR)
+        all_df   = recategorize(all_df, cat_data["rules"], cat_data.get("overrides", {}))
+        st.session_state.df       = all_df
+        st.session_state.cat_data = cat_data
+        st.session_state.context  = build_context(all_df, load_profile() or None)
         real    = all_df[~all_df["reserveret"]] if "reserveret" in all_df.columns else all_df
         income  = real[real["beløb"] > 0]["beløb"].sum()
         expense = real[real["beløb"] < 0]["beløb"].sum()
@@ -204,6 +211,66 @@ with tab2:
         disp["saldo"] = disp["saldo"].map(lambda x: f"{x:,.2f}" if pd.notna(x) else "")
         disp.columns  = ["Dato", "Navn/Beskrivelse", "Afsender", "Modtager", "Beløb", "Saldo", "Kategori", "Valuta"]
         st.dataframe(disp, use_container_width=True, hide_index=True)
+
+        # ── Category editor ───────────────────────────────────────────────────
+        cat_data = st.session_state.cat_data or load_categories(CONFIG_DIR)
+        rules    = cat_data["rules"]
+        overrides = cat_data.get("overrides", {})
+        cat_names = [c for c in rules.keys() if c != "Andet"] + ["Andet"]
+
+        with st.expander("🏷️ Reklassificér & Rediger regler"):
+            ed_col1, ed_col2 = st.columns(2)
+
+            # ── Per-transaction override ──────────────────────────────────────
+            with ed_col1:
+                st.markdown("**Reklassificér transaktion**")
+                non_res = filt[~filt["reserveret"]] if "reserveret" in filt.columns else filt
+                if non_res.empty:
+                    st.caption("Ingen transaktioner at reklassificere.")
+                else:
+                    tx_labels = [
+                        f"{r['dato'].strftime('%d/%m/%y') if pd.notna(r['dato']) else '?'} · "
+                        f"{str(r['label'])[:30]} · {r['beløb']:+,.0f} DKK"
+                        for _, r in non_res.iterrows()
+                    ]
+                    tx_idx = st.selectbox("Vælg transaktion", range(len(non_res)), format_func=lambda i: tx_labels[i], key="tx_pick")
+                    new_cat = st.selectbox("Ny kategori", cat_names, key="tx_new_cat")
+                    if st.button("💾 Gem reklassificering"):
+                        row = non_res.iloc[tx_idx]
+                        dato = row["dato"].strftime("%Y-%m-%d") if pd.notna(row["dato"]) else "NaT"
+                        key  = f"{dato}||{row['beløb']}||{row['label']}"
+                        overrides[key] = new_cat
+                        save_categories(CONFIG_DIR, {"rules": rules, "overrides": overrides})
+                        st.success(f"Gemt: '{row['label']}' → {new_cat}")
+                        st.rerun()
+
+            # ── Keyword rule editor ───────────────────────────────────────────
+            with ed_col2:
+                st.markdown("**Rediger kategori-nøgleord**")
+                edit_cat = st.selectbox("Vælg kategori", [c for c in rules.keys() if c != "Andet"], key="rule_cat")
+                current_kws = ", ".join(rules.get(edit_cat, []))
+                new_kws_raw = st.text_area("Nøgleord (komma-separeret)", value=current_kws, height=100, key="rule_kws")
+                if st.button("💾 Gem nøgleord"):
+                    rules[edit_cat] = [k.strip().lower() for k in new_kws_raw.split(",") if k.strip()]
+                    save_categories(CONFIG_DIR, {"rules": rules, "overrides": overrides})
+                    st.success(f"Nøgleord for '{edit_cat}' gemt.")
+                    st.rerun()
+
+            st.divider()
+            st.markdown("**Tilføj ny kategori**")
+            nc1, nc2, nc3 = st.columns([2, 3, 1])
+            new_cat_name = nc1.text_input("Navn", key="new_cat_name")
+            new_cat_kws  = nc2.text_input("Nøgleord (komma-separeret)", key="new_cat_kws")
+            if nc3.button("Opret", key="new_cat_btn"):
+                if new_cat_name and new_cat_name not in rules:
+                    rules[new_cat_name] = [k.strip().lower() for k in new_cat_kws.split(",") if k.strip()]
+                    save_categories(CONFIG_DIR, {"rules": rules, "overrides": overrides})
+                    st.success(f"Kategori '{new_cat_name}' oprettet.")
+                    st.rerun()
+                elif new_cat_name in rules:
+                    st.warning(f"'{new_cat_name}' findes allerede.")
+                else:
+                    st.warning("Angiv et kategorinavn.")
 
 # ── TAB 3 ─────────────────────────────────────────────────────────────────────
 with tab3:

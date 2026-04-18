@@ -25,7 +25,7 @@ from pathlib import Path
 
 import requests
 
-from nordea_parser import parse_any, load_all_processed, build_context
+from nordea_parser import parse_any, load_all_processed, build_context, load_categories, recategorize
 
 BASE_DIR     = Path(__file__).parent
 INBOX        = BASE_DIR / "data/inbox"
@@ -185,6 +185,10 @@ def main():
         scan_inbox()
 
     df = load_all_processed(PROCESSED)
+
+    if df is not None:
+        cat_data = load_categories(BASE_DIR / "config")
+        df = recategorize(df, cat_data["rules"], cat_data.get("overrides", {}))
 
     if df is None or len(df) == 0:
         if args.type == "scan":

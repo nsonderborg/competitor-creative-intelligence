@@ -7,6 +7,7 @@ remain in each entry point; pass PROCESSED explicitly to load_all_processed().
 """
 
 import io
+import json
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -63,19 +64,55 @@ def _clean_amount(val):
         return None
 
 
-def categorize(row):
+def _override_key(row) -> str:
+    """Build the stable key used for per-transaction category overrides."""
+    dato = row.get("dato")
+    dato_str = dato.strftime("%Y-%m-%d") if pd.notna(dato) else "NaT"
+    return f"{dato_str}||{row.get('beløb', '')}||{row.get('label', '')}"
+
+
+def categorize(row, rules: dict, overrides: dict | None = None) -> str:
+    """Categorise a transaction row. Overrides take precedence over keyword rules."""
+    if overrides:
+        key = _override_key(row)
+        if key in overrides:
+            return overrides[key]
     text = " ".join(filter(None, [
         str(row.get("navn") or ""),
         str(row.get("beskrivelse") or ""),
         str(row.get("modtager") or ""),
         str(row.get("afsender") or ""),
     ])).lower()
-    for cat, kws in CATEGORIES.items():
+    for cat, kws in rules.items():
         if cat == "Andet":
             continue
         if any(kw in text for kw in kws):
             return cat
     return "Andet"
+
+
+def recategorize(df: pd.DataFrame, rules: dict, overrides: dict | None = None) -> pd.DataFrame:
+    """Re-apply category rules and overrides to an already-parsed DataFrame."""
+    df = df.copy()
+    df["kategori"] = df.apply(lambda r: categorize(r, rules, overrides), axis=1)
+    return df
+
+
+def load_categories(config_dir: Path) -> dict:
+    """Load category rules and overrides from JSON, seeding from CATEGORIES on first run."""
+    cat_file = config_dir / "categories.json"
+    if cat_file.exists():
+        with open(cat_file, encoding="utf-8") as f:
+            return json.load(f)
+    return {"rules": dict(CATEGORIES), "overrides": {}}
+
+
+def save_categories(config_dir: Path, data: dict):
+    """Persist category rules and overrides to config/categories.json."""
+    cat_file = config_dir / "categories.json"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    with open(cat_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def _normalise(df: pd.DataFrame) -> pd.DataFrame | None:
@@ -120,8 +157,8 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame | None:
                 (r.get("modtager") if r["type"] == "Udgift" else r.get("afsender")) or "–")
     df["label"] = df.apply(best_label, axis=1)
 
-    # Categorise
-    df["kategori"] = df.apply(categorize, axis=1)
+    # Categorise using defaults — callers can recategorize() with custom rules afterwards
+    df["kategori"] = df.apply(lambda r: categorize(r, CATEGORIES), axis=1)
 
     return df.sort_values("dato", ascending=False, na_position="first").reset_index(drop=True)
 
