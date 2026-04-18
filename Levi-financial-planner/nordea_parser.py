@@ -8,6 +8,7 @@ remain in each entry point; pass PROCESSED explicitly to load_all_processed().
 
 import io
 import json
+import re
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -331,3 +332,259 @@ Familie: {profile.get('family','')} | Karriere: {profile.get('career','')}
 Mål: {profile.get('goals','')} | Finansiel frihed: {profile.get('freedom','')}
 """
     return ctx
+
+
+# ── Saxo Bank parsers ─────────────────────────────────────────────────────────
+
+_MONTH_ABBR = {
+    "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04",
+    "May": "05", "Jun": "06", "Jul": "07", "Aug": "08",
+    "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12",
+}
+
+# Static ISIN → human-readable name for the known Saxo ASK ETFs.
+# Falls back to raw ISIN if an unexpected holding appears.
+_SAXO_ISIN_NAMES = {
+    "IE00B4K48X80": "iShares Core MSCI Europe",
+    "IE00B4L5Y983": "iShares Core MSCI World",
+    "IE00B5BMR087": "iShares Core S&P 500",
+    "IE00B4L5YC18": "iShares MSCI Emerging Markets",
+}
+
+
+def _saxo_date_str(date_str: str) -> str:
+    """Convert Saxo date format '17-Apr-2026' → ISO '2026-04-17'."""
+    return datetime.strptime(date_str, "%d-%b-%Y").strftime("%Y-%m-%d")
+
+
+def _months_in_period(period_start: str, period_end: str) -> list[str]:
+    """Return ['2026-01', '2026-02', ...] for all months in the reporting period."""
+    from datetime import date
+    start = datetime.strptime(period_start, "%Y-%m-%d").date().replace(day=1)
+    end   = datetime.strptime(period_end,   "%Y-%m-%d").date()
+    months = []
+    d = start
+    while d <= end:
+        months.append(d.strftime("%Y-%m"))
+        d = d.replace(month=d.month + 1) if d.month < 12 else d.replace(year=d.year + 1, month=1)
+    return months
+
+
+def parse_saxo_pdf(path, config_dir: Path | None = None) -> dict:
+    """Extract portfolio snapshot from a Saxo Bank PDF report.
+
+    Parses pages 2, 4, 5, 6, 8 for: account metadata, total return %, monthly
+    returns, per-ETF returns, holdings (ISIN / weight / prices), and cost ratio.
+
+    Args:
+        path:       Path to the Saxo PDF (str or Path).
+        config_dir: If provided, writes result to config_dir/portfolio.json.
+
+    Returns:
+        Portfolio dict suitable for build_portfolio_context() and JSON storage.
+    """
+    try:
+        import pypdf
+    except ImportError:
+        subprocess.run(["pip", "install", "pypdf", "--break-system-packages", "-q"], check=True)
+        import pypdf
+
+    reader = pypdf.PdfReader(str(path))
+    pages  = [p.extract_text() or "" for p in reader.pages]
+
+    p2 = pages[1]   # Account summary + total return %
+    p4 = pages[3]   # Monthly returns table
+    p5 = pages[4]   # Per-ETF P/L + %Return
+    p6 = pages[5]   # Holdings with ISINs, prices, weights
+    p8 = pages[7]   # Cost summary
+
+    # ── Account metadata (page 2) ──────────────────────────────────────────────
+    m = re.search(r"Currency:(\w+)", p2)
+    currency = m.group(1) if m else "DKK"
+
+    m = re.search(r"Account\(s\):(.+?)(?:\n|Page\d)", p2)
+    account = m.group(1).strip() if m else "Aktiesparekonto"
+
+    period_start = period_end = as_of = None
+    m = re.search(r"(\d{2}-[A-Za-z]{3}-\d{4})-(\d{2}-[A-Za-z]{3}-\d{4})", p2)
+    if m:
+        period_start = _saxo_date_str(m.group(1))
+        period_end   = _saxo_date_str(m.group(2))
+        as_of        = period_end
+
+    m = re.search(r"ChangeinAccountValue\s+return\s+([-\d.]+)%", p2)
+    total_return_pct = float(m.group(1)) if m else None
+
+    # ── Monthly returns (page 4) ───────────────────────────────────────────────
+    # Match the data row: "%Return 2.1% 1.6% -6.8% 9.2% 5.7%"
+    # (requires ≥2 consecutive percentages to skip the standalone "%Return" header)
+    monthly_returns: dict[str, float] = {}
+    m = re.search(r"%Return\s+((?:[-\d.]+%\s*){2,})", p4)
+    if m and period_start and period_end:
+        vals   = re.findall(r"([-\d.]+)%", m.group(1))
+        months = _months_in_period(period_start, period_end)
+        for month, val in zip(months, vals):   # zip stops at shorter list (months); total % dropped
+            monthly_returns[month] = float(val)
+
+    # ── Per-ETF %Return (page 5) ───────────────────────────────────────────────
+    # Each line: "{SquishedName}UCITSETF - 5.23%"
+    etf_returns = [float(v) for v in re.findall(r"UCITSETF - ([-\d.]+)%", p5)]
+
+    # ── Holdings (page 6) ─────────────────────────────────────────────────────
+    # Pattern: "UCITSETF(ISIN:\n{ISIN})\nEUR\n Equity {conv} {open} {current} {chg}% {weight}%"
+    holding_re = re.compile(
+        r"UCITSETF\(ISIN:\n([A-Z]{2}[A-Z0-9]{10})\)\nEUR\n Equity "
+        r"([\d.]+) ([\d.]+) ([\d.]+) ([-\d.]+)% ([\d.]+)%"
+    )
+    holdings = []
+    for i, hm in enumerate(holding_re.finditer(p6)):
+        isin       = hm.group(1)
+        conv_rate  = float(hm.group(2))
+        open_price = float(hm.group(3))
+        curr_price = float(hm.group(4))
+        price_chg  = float(hm.group(5))
+        weight_pct = float(hm.group(6))
+        return_pct = etf_returns[i] if i < len(etf_returns) else None
+        holdings.append({
+            "name":              _SAXO_ISIN_NAMES.get(isin, isin),
+            "isin":              isin,
+            "currency":          "EUR",
+            "weight_pct":        weight_pct,
+            "return_pct":        return_pct,
+            "open_price_eur":    open_price,
+            "current_price_eur": curr_price,
+            "price_change_pct":  price_chg,
+            "eur_dkk_rate":      conv_rate,
+        })
+
+    # Cash position
+    m = re.search(r"Cash - ([\d.]+)%", p6)
+    if m:
+        holdings.append({"name": "Cash", "isin": None, "currency": "DKK",
+                         "weight_pct": float(m.group(1)), "return_pct": None})
+
+    # ── Cost ratio (page 8) ────────────────────────────────────────────────────
+    m = re.search(r"Costasapercentage\s+([-\d.]+)%", p8)
+    cost_ratio = float(m.group(1)) if m else None
+
+    portfolio = {
+        "account":          account,
+        "currency":         currency,
+        "as_of":            as_of,
+        "period":           {"start": period_start, "end": period_end},
+        "total_return_pct": total_return_pct,
+        "monthly_returns":  monthly_returns,
+        "cost_ratio_pct":   cost_ratio,
+        "holdings":         holdings,
+    }
+
+    if config_dir is not None:
+        config_dir = Path(config_dir)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with open(config_dir / "portfolio.json", "w", encoding="utf-8") as f:
+            json.dump(portfolio, f, indent=2, ensure_ascii=False)
+
+    return portfolio
+
+
+def parse_saxo_numbers(path) -> pd.DataFrame | None:
+    """Parse a Saxo Bank .numbers account statement → normalised transaction DataFrame.
+
+    Uses Sheet 1 ("Account Statement") which contains posting dates, event
+    descriptions, and cash-flow amounts. The resulting DataFrame is compatible
+    with the standard transaction pipeline (dato, beløb, label, kategori …).
+    """
+    try:
+        from numbers_parser import Document
+    except ImportError:
+        subprocess.run(["pip", "install", "numbers-parser", "--break-system-packages", "-q"], check=True)
+        from numbers_parser import Document
+
+    doc = Document(str(path))
+    sheet = doc.sheets[1] if len(doc.sheets) > 1 else doc.sheets[0]
+    table = sheet.tables[0]
+    rows  = [[cell.value for cell in row] for row in table.iter_rows()]
+    if not rows:
+        return None
+
+    headers = [str(h).strip() if h is not None else f"col_{i}" for i, h in enumerate(rows[0])]
+    records = [dict(zip(headers, r)) for r in rows[1:] if any(v is not None for v in r)]
+    if not records:
+        return None
+
+    df = pd.DataFrame(records)
+
+    col_map = {
+        "Posting Date": "dato",
+        "Value Date":   "value_date",
+        "Event":        "beskrivelse",
+        "Net Change":   "beløb",
+        "Cash Balance": "saldo",
+        "Comment":      "comment",
+        "Account ID":   "account_id",
+    }
+    df = df.rename(columns={c: col_map.get(c, c) for c in df.columns})
+
+    if "dato" in df.columns:
+        df["dato"] = pd.to_datetime(df["dato"], dayfirst=True, errors="coerce")
+    if "beløb" in df.columns:
+        df["beløb"] = df["beløb"].apply(_clean_amount)
+    if "saldo" in df.columns:
+        df["saldo"] = df["saldo"].apply(_clean_amount)
+
+    # Add standard columns so the DataFrame is pipeline-compatible
+    df["navn"]       = None
+    df["modtager"]   = None
+    df["afsender"]   = None
+    df["valuta"]     = "DKK"
+    df["reserveret"] = False
+    df["label"]      = df.get("beskrivelse", pd.Series(dtype=str)).astype(str)
+    df["type"]       = df.get("beløb", pd.Series(dtype=float)).apply(
+        lambda x: "Indkomst" if isinstance(x, (int, float)) and x > 0
+                  else "Udgift" if isinstance(x, (int, float)) and x < 0
+                  else "Andet"
+    )
+    df["kategori"] = "Overførsler"
+
+    return df.sort_values("dato", ascending=False, na_position="first").reset_index(drop=True)
+
+
+def build_portfolio_context(portfolio: dict) -> str:
+    """Format a Saxo portfolio snapshot for AI context.
+
+    Output contains only percentage figures and prices (EUR) — no absolute DKK
+    amounts — making it safe to pass directly to the Claude API.
+    """
+    if not portfolio:
+        return ""
+
+    monthly = portfolio.get("monthly_returns", {})
+    m_lines = [f"  {month}: {val:+}%" for month, val in sorted(monthly.items())]
+
+    h_lines = []
+    for h in portfolio.get("holdings", []):
+        name = h.get("name", h.get("isin", "?"))
+        if h.get("isin") is None:          # Cash position
+            h_lines.append(f"  {name}: {h.get('weight_pct', '?')}% vægt")
+            continue
+        price_chg = h.get("price_change_pct")
+        price_chg_str = f"{price_chg:+.2f}%" if price_chg is not None else "?"
+        h_lines.append(
+            f"  {name} ({h['isin']}): {h.get('weight_pct', '?')}% vægt, "
+            f"{h.get('return_pct', '?')}% YTD, "
+            f"kurs {h.get('current_price_eur', '?')} EUR ({price_chg_str} ændring)"
+        )
+
+    return f"""
+=== INVESTERINGSPORTEFØLJE ===
+Konto: {portfolio.get('account', '?')} | Valuta: {portfolio.get('currency', 'DKK')}
+Pr. dato: {portfolio.get('as_of', '?')} | Periode: {portfolio.get('period', {}).get('start', '?')} — {portfolio.get('period', {}).get('end', '?')}
+Samlet YTD afkast: {portfolio.get('total_return_pct', '?')}%
+Omkostningsprocent: {portfolio.get('cost_ratio_pct', '?')}%
+
+MÅNEDLIGE AFKAST:
+{chr(10).join(m_lines) if m_lines else '  (ingen data)'}
+
+BEHOLDNINGER:
+{chr(10).join(h_lines) if h_lines else '  (ingen data)'}
+"""
