@@ -41,6 +41,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -99,9 +100,9 @@ def _build_redacted_context(df, profile: dict, portfolio: dict, days: int | None
 
 # ── Claude API ────────────────────────────────────────────────────────────────
 
-GOLDMAN_SYSTEM = """Du er Chief Wealth Strategist hos Goldman Sachs Private Wealth Management med 25 års erfaring.
-Lav strukturerede, datadrevne analyser med konkrete scores og DKK-tal. Identificer finansielle gaps og kvantificér konsekvenserne.
-Svar altid på dansk med professionel, direkte tone."""
+OLLAMA_URL = "http://localhost:11434/api/chat"
+
+ANALYST_SYSTEM = "Du er en præcis finansanalytiker. Konkret, direkte, brug tal. Svar på dansk."
 
 MONTHLY_PROMPT = """Lav en kompakt månedlig finansiel diagnose med:
 1. **Finansiel Helbredsscore denne måned (X/10)**
@@ -120,24 +121,34 @@ WEEKLY_PROMPT = """Lav en kort ugentlig finansiel vurdering:
 Max 300 ord."""
 
 
-def ask_claude(prompt: str, system: str, context: str) -> str:
-    """Call Claude API (non-streaming) and return the full response text."""
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY mangler i .env")
+def get_default_model() -> str:
     try:
-        import anthropic
-    except ImportError:
-        raise RuntimeError("anthropic-pakken mangler — kør: pip install anthropic")
+        r = requests.get("http://localhost:11434/api/tags", timeout=5)
+        models = [m["name"] for m in r.json().get("models", [])]
+        for pref in ["qwen2.5:7b", "llama3.1", "llama3.2", "mistral"]:
+            for m in models:
+                if pref in m:
+                    return m
+        return models[0] if models else "llama3.1"
+    except Exception:
+        return "llama3.1"
 
-    client = anthropic.Anthropic(api_key=api_key)
-    msg = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        system=system,
-        messages=[{"role": "user", "content": f"Her er mine finansielle data:\n\n{context}\n\n{prompt}"}],
-    )
-    return msg.content[0].text
+
+def ask_ollama(model: str, prompt: str, system: str, context: str) -> str:
+    """Call local Ollama and return the response text."""
+    msgs = [
+        {"role": "system",    "content": system},
+        {"role": "user",      "content": f"Her er mine finansielle data:\n\n{context}\n\n{prompt}"},
+    ]
+    try:
+        r = requests.post(OLLAMA_URL, json={"model": model, "messages": msgs, "stream": False}, timeout=300)
+        if r.status_code == 200:
+            return r.json()["message"]["content"]
+        return f"(Ollama fejl {r.status_code})"
+    except requests.exceptions.ConnectionError:
+        return "(Ollama ikke tilgængelig — kør `ollama serve`)"
+    except Exception as e:
+        return f"(Fejl: {e})"
 
 
 def _extract_actions(analysis: str) -> str:
@@ -199,7 +210,7 @@ def push_to_notion(properties: dict, db_id: str, notion_key: str, dry_run: bool 
 
 # ── Sync functions ────────────────────────────────────────────────────────────
 
-def sync_monthly(df, profile: dict, portfolio: dict, dry_run: bool = False):
+def sync_monthly(df, profile: dict, portfolio: dict, model: str, dry_run: bool = False):
     import pandas as pd
     log("Bygger månedlig Notion-side...")
 
@@ -209,15 +220,10 @@ def sync_monthly(df, profile: dict, portfolio: dict, dry_run: bool = False):
     savings_rate = round((income + expense) / income * 100, 1) if income > 0 else 0.0
     budget_status = _budget_status(df, profile)
 
-    # Claude API call with redacted context (no merchant names, % only)
-    log("Kalder Claude API (kategorier og %-data — ingen handelsnavne)...")
-    try:
-        context  = _build_redacted_context(df, profile, portfolio, days=35)
-        analysis = ask_claude(MONTHLY_PROMPT, GOLDMAN_SYSTEM, context)
-        log(f"Claude-analyse modtaget ({len(analysis)} tegn)")
-    except Exception as e:
-        log(f"⚠ Claude API fejl: {e} — fortsætter uden analyse")
-        analysis = f"(Analyse ikke tilgængelig: {e})"
+    log(f"Kalder Ollama ({model}) for analyse...")
+    context  = _build_redacted_context(df, profile, portfolio, days=35)
+    analysis = ask_ollama(model, MONTHLY_PROMPT, ANALYST_SYSTEM, context)
+    log(f"Analyse modtaget ({len(analysis)} tegn)")
     actions = _extract_actions(analysis)
 
     now = datetime.now()
@@ -259,7 +265,7 @@ def sync_monthly(df, profile: dict, portfolio: dict, dry_run: bool = False):
     log(f"Analyse gemt lokalt: {rpath.name}")
 
 
-def sync_weekly(df, profile: dict, portfolio: dict, dry_run: bool = False):
+def sync_weekly(df, profile: dict, portfolio: dict, model: str, dry_run: bool = False):
     import pandas as pd
     log("Bygger ugentlig Notion-side...")
 
@@ -270,14 +276,10 @@ def sync_weekly(df, profile: dict, portfolio: dict, dry_run: bool = False):
     income  = float(week_df[week_df["beløb"] > 0]["beløb"].sum())
     expense = float(week_df[week_df["beløb"] < 0]["beløb"].sum())
 
-    log("Kalder Claude API (ugentlig kontekst — seneste 8 dage)...")
-    try:
-        context  = _build_redacted_context(df, profile, portfolio, days=8)
-        analysis = ask_claude(WEEKLY_PROMPT, GOLDMAN_SYSTEM, context)
-        log(f"Claude-analyse modtaget ({len(analysis)} tegn)")
-    except Exception as e:
-        log(f"⚠ Claude API fejl: {e} — fortsætter uden analyse")
-        analysis = f"(Analyse ikke tilgængelig: {e})"
+    log(f"Kalder Ollama ({model}) for ugentlig analyse...")
+    context  = _build_redacted_context(df, profile, portfolio, days=8)
+    analysis = ask_ollama(model, WEEKLY_PROMPT, ANALYST_SYSTEM, context)
+    log(f"Analyse modtaget ({len(analysis)} tegn)")
     actions = _extract_actions(analysis)
 
     db_id      = os.getenv("NOTION_WEEKLY_DB_ID") or os.getenv("NOTION_DB_ID")
@@ -321,8 +323,14 @@ def main():
         "--dry-run", action="store_true",
         help="Vis hvad der ville blive sendt til Notion — ingen faktisk API-kald"
     )
+    parser.add_argument(
+        "--model", default=None,
+        help="Ollama model (auto-detect hvis ikke angivet)"
+    )
     args = parser.parse_args()
 
+    model     = args.model or get_default_model()
+    log(f"Model: {model}")
     profile   = load_profile()
     portfolio = load_portfolio()
 
@@ -334,6 +342,10 @@ def main():
     cat_data = load_categories(CONFIG_DIR)
     df = recategorize(df, cat_data["rules"], cat_data.get("overrides", {}))
 
+    # Ensure dato is datetime dtype after concat (can degrade to object dtype)
+    import pandas as pd
+    df["dato"] = pd.to_datetime(df["dato"], errors="coerce")
+
     real = df[~df["reserveret"]] if "reserveret" in df.columns else df
     log(
         f"Data: {len(real)} bogførte posteringer "
@@ -342,9 +354,9 @@ def main():
     )
 
     if args.type == "monthly":
-        sync_monthly(df, profile, portfolio, dry_run=args.dry_run)
+        sync_monthly(df, profile, portfolio, model=model, dry_run=args.dry_run)
     else:
-        sync_weekly(df, profile, portfolio, dry_run=args.dry_run)
+        sync_weekly(df, profile, portfolio, model=model, dry_run=args.dry_run)
 
     log("Færdig.")
 
