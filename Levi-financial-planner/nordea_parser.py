@@ -203,7 +203,10 @@ def parse_csv_file(path_or_buffer) -> pd.DataFrame | None:
 
     lines = text.strip().split("\n")
     sep   = ";" if lines and lines[0].count(";") >= lines[0].count(",") else ","
-    df    = pd.read_csv(io.StringIO(text), sep=sep, encoding_errors="replace")
+    try:
+        df = pd.read_csv(io.StringIO(text), sep=sep, encoding_errors="replace")
+    except pd.errors.EmptyDataError:
+        return None
     df.columns = df.columns.str.strip()
     return _normalise(df)
 
