@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from nordea_parser import (
-    parse_any, load_all_processed, build_context,
+    parse_any, load_all_processed, build_context, build_balance_sheet_context,
     load_categories, save_categories, recategorize,
 )
 
@@ -132,8 +132,9 @@ with st.sidebar:
         _profile = load_profile() or {}
         st.session_state.df       = all_df
         st.session_state.cat_data = cat_data
-        st.session_state.context  = build_context(
-            all_df, _profile or None, budgets=_profile.get("budgets") or None
+        st.session_state.context  = (
+            build_context(all_df, _profile or None, budgets=_profile.get("budgets") or None)
+            + build_balance_sheet_context(_profile)
         )
         real    = all_df[~all_df["reserveret"]] if "reserveret" in all_df.columns else all_df
         income  = real[real["beløb"] > 0]["beløb"].sum()
@@ -350,7 +351,7 @@ with tab4:
     else:
         st.markdown(f"**Profil:** Alder {profile.get('age','?')} · {profile.get('income','?')} DKK/md · Formue {profile.get('net_worth','?')} DKK")
         if st.button("🏦 Generer mit BlackRock Livs-Roadmap", type="primary"):
-            ctx = build_context(df, profile) if df is not None else json.dumps(profile, ensure_ascii=False)
+            ctx = (build_context(df, profile) if df is not None else "") + build_balance_sheet_context(profile)
             roadmap_prompt = f"""Lav et komplet livslang finansielt roadmap.
 
 {ctx}
@@ -406,10 +407,65 @@ with tab5:
                 value=int(saved_budgets.get(cat, 0)), step=100, key=f"budget_{cat}"
             )
 
+        # ── Balance sheet ─────────────────────────────────────────────────────
+        with st.expander("💰 Formue & Balance Sheet"):
+            saved_assets = profile.get("assets", {})
+            st.markdown("**Aktiver**")
+            a1, a2 = st.columns(2)
+            liq_val  = a1.number_input("Likviditet — kontanter/opsparing (DKK)", 0, 10_000_000, int(saved_assets.get("liquidity_dkk", 0)), step=10_000, key="bs_liq")
+            inv_val  = a2.number_input("Investeringer — aktier/fonde (DKK)", 0, 10_000_000, int(saved_assets.get("investments_dkk", 0)), step=10_000, key="bs_inv",
+                                       help="Se config/portfolio.json for porteføljeværdi fra Saxo")
+            pen_val  = a1.number_input("Pensionsopsparing inkl. arbejdsgiver (DKK)", 0, 10_000_000, int(saved_assets.get("pension_dkk", 0)), step=10_000, key="bs_pen")
+            re_val   = a2.number_input("Friværdi — fast ejendom (DKK)", 0, 10_000_000, int(saved_assets.get("real_estate_equity_dkk", 0)), step=10_000, key="bs_re")
+            oth_val  = a1.number_input("Øvrige aktiver (DKK)", 0, 10_000_000, int(saved_assets.get("other_dkk", 0)), step=10_000, key="bs_oth")
+            new_assets = {"liquidity_dkk": liq_val, "investments_dkk": inv_val,
+                          "pension_dkk": pen_val, "real_estate_equity_dkk": re_val, "other_dkk": oth_val}
+
+            st.divider()
+            st.markdown("**Passiver**")
+            saved_liabs = {d["name"]: d for d in profile.get("liabilities", [])}
+            liab_defs = [
+                ("Boliglån", True),
+                ("Forbrugslån", False),
+                ("Kreditkort", False),
+                ("Studielån", False),
+            ]
+            new_liabs = []
+            for debt_name, has_years in liab_defs:
+                saved = saved_liabs.get(debt_name, {})
+                cols = st.columns([3, 2, 2] if has_years else [3, 2, 2])
+                bal  = cols[0].number_input(f"{debt_name} — saldo (DKK)", 0, 5_000_000, int(saved.get("balance_dkk", 0)), step=10_000, key=f"liab_bal_{debt_name}")
+                rate = cols[1].number_input(f"Rente (%)", 0.0, 30.0, float(saved.get("interest_rate_pct", 0.0)), step=0.1, key=f"liab_rate_{debt_name}")
+                if has_years:
+                    yrs = cols[2].number_input("År tilbage", 0, 40, int(saved.get("years_remaining", 0)), step=1, key=f"liab_yrs_{debt_name}")
+                    new_liabs.append({"name": debt_name, "balance_dkk": bal, "interest_rate_pct": rate, "years_remaining": yrs})
+                else:
+                    new_liabs.append({"name": debt_name, "balance_dkk": bal, "interest_rate_pct": rate})
+
+            st.divider()
+            st.markdown("**Forsikringer**")
+            saved_ins = profile.get("insurance", {})
+            i1, i2, i3 = st.columns(3)
+            life_cov  = i1.number_input("Livsforsikring dækning (DKK)", 0, 10_000_000, int(saved_ins.get("life_dkk", 0)), step=100_000, key="ins_life")
+            crit_ill  = i2.checkbox("Kritisk sygdom", value=bool(saved_ins.get("critical_illness", False)), key="ins_crit")
+            home_ins  = i3.checkbox("Indboforsikring", value=bool(saved_ins.get("home", False)), key="ins_home")
+            new_insurance = {"life_dkk": life_cov, "critical_illness": crit_ill, "home": home_ins}
+
+            st.divider()
+            st.markdown("**Pension**")
+            saved_pen = profile.get("pension", {})
+            p1, p2, p3 = st.columns(3)
+            emp_pct   = p1.number_input("Arbejdsgiverbidrag (%/md)", 0.0, 25.0, float(saved_pen.get("employer_contribution_pct", 0.0)), step=0.5, key="pen_emp")
+            priv_dkk  = p2.number_input("Privat bidrag (DKK/md)", 0, 20_000, int(saved_pen.get("private_contribution_dkk", 0)), step=100, key="pen_priv")
+            ret_age   = p3.number_input("Pensionsalder-mål", 50, 75, int(saved_pen.get("target_retirement_age", 67)), step=1, key="pen_age")
+            new_pension = {"employer_contribution_pct": emp_pct, "private_contribution_dkk": priv_dkk, "target_retirement_age": ret_age}
+
         if st.button("💾 Gem profil", type="primary"):
             save_profile({"age": age, "income": income_p, "net_worth": net_worth,
                           "family": family, "career": career, "goals": goals,
-                          "freedom": freedom, "budgets": new_budgets})
+                          "freedom": freedom, "budgets": new_budgets,
+                          "assets": new_assets, "liabilities": new_liabs,
+                          "insurance": new_insurance, "pension": new_pension})
             st.success("Profil gemt!")
 
     with col2:

@@ -549,6 +549,94 @@ def parse_saxo_numbers(path) -> pd.DataFrame | None:
     return df.sort_values("dato", ascending=False, na_position="first").reset_index(drop=True)
 
 
+def build_balance_sheet_context(profile: dict) -> str:
+    """Format the balance sheet section of the user profile for AI context.
+
+    Covers assets, liabilities, insurance, and pension.
+    Returns an empty string if none of the balance sheet fields are populated.
+    """
+    if not profile:
+        return ""
+
+    assets      = profile.get("assets", {})
+    liabilities = profile.get("liabilities", [])
+    insurance   = profile.get("insurance", {})
+    pension     = profile.get("pension", {})
+
+    if not any([assets, liabilities, insurance, pension]):
+        return ""
+
+    # ── Assets ────────────────────────────────────────────────────────────────
+    liquidity    = assets.get("liquidity_dkk", 0) or 0
+    investments  = assets.get("investments_dkk", 0) or 0
+    pension_sav  = assets.get("pension_dkk", 0) or 0
+    real_estate  = assets.get("real_estate_equity_dkk", 0) or 0
+    other_assets = assets.get("other_dkk", 0) or 0
+    total_assets = liquidity + investments + pension_sav + real_estate + other_assets
+
+    asset_lines = []
+    if liquidity:    asset_lines.append(f"  Likviditet (kontanter/opsparing): {liquidity:,.0f} DKK")
+    if investments:  asset_lines.append(f"  Investeringer (aktier/fonde):     {investments:,.0f} DKK")
+    if pension_sav:  asset_lines.append(f"  Pension (arbejdsmarkeds + privat):{pension_sav:,.0f} DKK")
+    if real_estate:  asset_lines.append(f"  Fast ejendom (friværdi):          {real_estate:,.0f} DKK")
+    if other_assets: asset_lines.append(f"  Andet:                            {other_assets:,.0f} DKK")
+
+    # ── Liabilities ───────────────────────────────────────────────────────────
+    total_liab = sum((d.get("balance_dkk") or 0) for d in liabilities)
+    liab_lines = []
+    for d in liabilities:
+        bal  = d.get("balance_dkk") or 0
+        if not bal:
+            continue
+        name = d.get("name", "Gæld")
+        rate = d.get("interest_rate_pct")
+        yrs  = d.get("years_remaining")
+        note = ""
+        if rate is not None:
+            note += f" (rente {rate}%"
+            if yrs:
+                note += f", {yrs} år tilbage"
+            note += ")"
+        liab_lines.append(f"  {name}{note}: {bal:,.0f} DKK")
+
+    net_worth = total_assets - total_liab
+
+    ctx = f"""
+=== BALANCE SHEET ===
+AKTIVER:
+{chr(10).join(asset_lines) if asset_lines else "  (ikke udfyldt)"}
+  Total aktiver: {total_assets:,.0f} DKK
+
+PASSIVER:
+{chr(10).join(liab_lines) if liab_lines else "  (ingen registreret gæld)"}
+  Total passiver: {total_liab:,.0f} DKK
+
+NETTO FORMUE: {net_worth:,.0f} DKK
+"""
+
+    # ── Insurance ─────────────────────────────────────────────────────────────
+    ins_lines = []
+    life = insurance.get("life_dkk")
+    if life:                                ins_lines.append(f"  Livsforsikring: {life:,.0f} DKK dækning")
+    if insurance.get("critical_illness"):   ins_lines.append("  Kritisk sygdom: Ja")
+    if insurance.get("home"):               ins_lines.append("  Indboforsikring: Ja")
+    if ins_lines:
+        ctx += "FORSIKRINGER:\n" + "\n".join(ins_lines) + "\n"
+
+    # ── Pension ───────────────────────────────────────────────────────────────
+    pen_lines = ["  ATP-bidrag: automatisk via arbejdsgiver"]
+    emp_pct  = pension.get("employer_contribution_pct")
+    priv_dkk = pension.get("private_contribution_dkk")
+    ret_age  = pension.get("target_retirement_age")
+    if emp_pct:  pen_lines.append(f"  Arbejdsgiverbidrag: {emp_pct}%/md")
+    if priv_dkk: pen_lines.append(f"  Privat bidrag: {priv_dkk:,.0f} DKK/md")
+    if ret_age:  pen_lines.append(f"  Pensionsalder-mål: {ret_age} år")
+    if len(pen_lines) > 1 or emp_pct or priv_dkk or ret_age:
+        ctx += "PENSION:\n" + "\n".join(pen_lines) + "\n"
+
+    return ctx
+
+
 def build_portfolio_context(portfolio: dict) -> str:
     """Format a Saxo portfolio snapshot for AI context.
 
