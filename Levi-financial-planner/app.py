@@ -129,9 +129,12 @@ with st.sidebar:
     if all_df is not None:
         cat_data = load_categories(CONFIG_DIR)
         all_df   = recategorize(all_df, cat_data["rules"], cat_data.get("overrides", {}))
+        _profile = load_profile() or {}
         st.session_state.df       = all_df
         st.session_state.cat_data = cat_data
-        st.session_state.context  = build_context(all_df, load_profile() or None)
+        st.session_state.context  = build_context(
+            all_df, _profile or None, budgets=_profile.get("budgets") or None
+        )
         real    = all_df[~all_df["reserveret"]] if "reserveret" in all_df.columns else all_df
         income  = real[real["beløb"] > 0]["beløb"].sum()
         expense = real[real["beløb"] < 0]["beløb"].sum()
@@ -183,6 +186,30 @@ with tab1:
                 real.dropna(subset=["dato"])["dato"].dt.to_period("M").astype(str)
             )["beløb"].sum()
             st.bar_chart(monthly)
+
+        # ── Budget progress ───────────────────────────────────────────────────
+        budgets = load_profile().get("budgets", {})
+        active  = {c: v for c, v in budgets.items() if v > 0}
+        if active:
+            st.subheader("Budgetstatus denne måned")
+            now = pd.Timestamp.now()
+            this_month = real[
+                real["dato"].dt.year.eq(now.year) & real["dato"].dt.month.eq(now.month)
+            ]
+            by_cat = this_month[this_month["beløb"] < 0].groupby("kategori")["beløb"].sum().abs()
+            for cat, limit in sorted(active.items()):
+                spent = float(by_cat.get(cat, 0))
+                pct   = spent / limit
+                label = f"{cat}: {spent:,.0f} / {limit:,.0f} DKK ({pct*100:.0f}%)"
+                if pct > 1.0:
+                    st.error(f"Over budget! {label}")
+                elif pct > 0.8:
+                    st.warning(label)
+                else:
+                    st.success(label)
+                st.progress(min(pct, 1.0))
+        else:
+            st.caption("💡 Sæt budgetmål under ⚙️ Profil & Rapporter for at se budgetstatus her.")
 
 # ── TAB 2 ─────────────────────────────────────────────────────────────────────
 with tab2:
@@ -364,9 +391,25 @@ with tab5:
         career    = st.text_area("Karrierebane", profile.get("career", ""), height=80)
         goals     = st.text_area("Finansielle mål", profile.get("goals", ""), height=80)
         freedom   = st.text_input("Hvad er finansiel frihed for dig?", profile.get("freedom", ""))
+
+        st.divider()
+        st.markdown("**Budgetmål pr. kategori (DKK/md)**")
+        NON_EXPENSE = {"Andet", "Løn & Indkomst", "Overførsler"}
+        budget_cats = load_categories(CONFIG_DIR)
+        expense_cats = [c for c in budget_cats["rules"] if c not in NON_EXPENSE]
+        saved_budgets = profile.get("budgets", {})
+        new_budgets = {}
+        b_cols = st.columns(2)
+        for i, cat in enumerate(expense_cats):
+            new_budgets[cat] = b_cols[i % 2].number_input(
+                cat, min_value=0, max_value=100_000,
+                value=int(saved_budgets.get(cat, 0)), step=100, key=f"budget_{cat}"
+            )
+
         if st.button("💾 Gem profil", type="primary"):
             save_profile({"age": age, "income": income_p, "net_worth": net_worth,
-                          "family": family, "career": career, "goals": goals, "freedom": freedom})
+                          "family": family, "career": career, "goals": goals,
+                          "freedom": freedom, "budgets": new_budgets})
             st.success("Profil gemt!")
 
     with col2:

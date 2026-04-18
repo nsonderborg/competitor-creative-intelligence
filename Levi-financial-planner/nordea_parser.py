@@ -243,13 +243,14 @@ def load_all_processed(processed_dir: Path) -> pd.DataFrame | None:
 
 # ── AI context builder ────────────────────────────────────────────────────────
 
-def build_context(df: pd.DataFrame, profile: dict | None = None, days: int | None = None) -> str:
+def build_context(df: pd.DataFrame, profile: dict | None = None, days: int | None = None, budgets: dict | None = None) -> str:
     """Build a financial summary string for Ollama context.
 
     Args:
         df:      Full transaction DataFrame (including reserveret rows).
         profile: Optional user profile dict from config/profile.json.
         days:    If set, filter to only the last N days (used by CLI reports).
+        budgets: Optional monthly budget limits per category {cat: dkk}.
     """
     if days:
         cutoff = datetime.now() - timedelta(days=days)
@@ -303,6 +304,22 @@ UDGIFTER PR. KATEGORI:
 TOP 10 UDGIFTER:
 {top_str}
 """
+    if budgets:
+        current_month = real[
+            real["dato"].dt.year.eq(datetime.now().year) &
+            real["dato"].dt.month.eq(datetime.now().month)
+        ]
+        by_cat_month = current_month[current_month["beløb"] < 0].groupby("kategori")["beløb"].sum().abs()
+        budget_lines = []
+        for cat, limit in sorted(budgets.items()):
+            if limit <= 0:
+                continue
+            spent = by_cat_month.get(cat, 0)
+            pct   = spent / limit * 100
+            budget_lines.append(f"  {cat}: {spent:,.0f} / {limit:,.0f} DKK ({pct:.0f}%)")
+        if budget_lines:
+            ctx += "\nBUDGETMÅL (denne måned):\n" + "\n".join(budget_lines) + "\n"
+
     if profile:
         ctx += f"""
 === BRUGERPROFIL ===
