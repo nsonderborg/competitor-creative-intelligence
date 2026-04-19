@@ -173,9 +173,9 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame | None:
     # Direction
     df["type"] = df["beløb"].apply(lambda x: "Indkomst" if x > 0 else "Udgift")
 
-    # Best display label: Navn > Beskrivelse > Modtager/Afsender
+    # Best display label: Beskrivelse > Navn > Modtager/Afsender
     def best_label(r):
-        return (r.get("navn") or r.get("beskrivelse") or
+        return (r.get("beskrivelse") or r.get("navn") or
                 (r.get("modtager") if r["type"] == "Udgift" else r.get("afsender")) or "–")
     df["label"] = df.apply(best_label, axis=1)
 

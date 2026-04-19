@@ -234,7 +234,7 @@ class TestParseCsvFile:
         csv_file.write_bytes(MINIMAL_CSV.encode("utf-8"))
         df = parse_csv_file(csv_file)
         assert "kategori" in df.columns
-        dagligvarer_row = df[df["label"].str.contains("Netto", case=False, na=False)]
+        dagligvarer_row = df[df["beløb"] == -100.0]
         assert not dagligvarer_row.empty
         assert dagligvarer_row.iloc[0]["kategori"] == "Dagligvarer"
 
