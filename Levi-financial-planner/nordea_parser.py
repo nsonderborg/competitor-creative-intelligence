@@ -258,6 +258,7 @@ def load_all_processed(processed_dir: Path) -> pd.DataFrame | None:
         for f in sorted(processed_dir.glob(pattern)):
             df = parse_any(f, f.name)
             if df is not None:
+                df["_source_file"] = f.stem
                 frames.append(df)
     if not frames:
         return None

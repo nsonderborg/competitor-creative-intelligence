@@ -225,8 +225,14 @@ with tab1:
     if df is None:
         st.info("Upload en fil i sidepanelet for at se dit dashboard.")
     else:
-        real    = df[~df["reserveret"]] if "reserveret" in df.columns else df
-        reserved = df[df["reserveret"]]  if "reserveret" in df.columns else pd.DataFrame()
+        sources = sorted(df["_source_file"].dropna().unique().tolist()) if "_source_file" in df.columns else []
+        if len(sources) > 1:
+            kilde1 = st.selectbox("Kilde", ["Alle"] + sources, key="tab1_kilde")
+            view = df[df["_source_file"] == kilde1] if kilde1 != "Alle" else df
+        else:
+            view = df
+        real    = view[~view["reserveret"]] if "reserveret" in view.columns else view
+        reserved = view[view["reserveret"]]  if "reserveret" in view.columns else pd.DataFrame()
         income  = real[real["beløb"] > 0]["beløb"].sum()
         expense = real[real["beløb"] < 0]["beløb"].sum()
         net     = income + expense
@@ -289,11 +295,18 @@ with tab2:
     else:
         reconciled = load_reconciled(CONFIG_DIR)
 
-        c1, c2, c3, c4 = st.columns([2, 2, 3, 2])
+        sources2 = sorted(df["_source_file"].dropna().unique().tolist()) if "_source_file" in df.columns else []
+        multi_source = len(sources2) > 1
+
+        if multi_source:
+            c1, c2, c3, c4, c5 = st.columns([2, 2, 3, 2, 2])
+        else:
+            c1, c2, c3, c4 = st.columns([2, 2, 3, 2])
         ftype    = c1.selectbox("Type", ["Alle", "Indkomst", "Udgift", "Reserveret"])
         fcat     = c2.selectbox("Kategori", ["Alle"] + sorted(df["kategori"].dropna().unique().tolist()))
         fsearch  = c3.text_input("Søg (navn/beskrivelse)")
         fafstemt = c4.radio("Afstemt", ["Alle", "Ja", "Nej"], horizontal=True)
+        fkilde   = c5.selectbox("Kilde", ["Alle"] + sources2) if multi_source else "Alle"
 
         filt = df.copy()
         if ftype == "Reserveret":
@@ -305,6 +318,8 @@ with tab2:
             filt = filt[filt["kategori"] == fcat]
         if fsearch:
             filt = filt[filt["label"].str.contains(fsearch, case=False, na=False)]
+        if fkilde != "Alle" and "_source_file" in filt.columns:
+            filt = filt[filt["_source_file"] == fkilde]
 
         # Align index for data_editor mapping
         filt = filt.reset_index(drop=True)
@@ -323,7 +338,7 @@ with tab2:
             keys = keys[mask].reset_index(drop=True)
 
         # Build editor DataFrame — Afstemt is the only editable column
-        editor_df = pd.DataFrame({
+        editor_data = {
             "✓": keys.map(lambda k: bool(reconciled.get(k, False))),
             "Dato": filt["dato"].dt.strftime("%d/%m/%Y").fillna("Reserveret"),
             "Navn/Beskrivelse": filt["label"].astype(str),
@@ -333,12 +348,18 @@ with tab2:
             "Saldo": filt["saldo"].map(lambda x: f"{x:,.2f}" if pd.notna(x) else ""),
             "Kategori": filt["kategori"].fillna(""),
             "Valuta": filt["valuta"].fillna(""),
-        })
+        }
+        if multi_source and "_source_file" in filt.columns:
+            editor_data["Kilde"] = filt["_source_file"].fillna("")
+        editor_df = pd.DataFrame(editor_data)
 
+        disabled_cols = ["Dato", "Navn/Beskrivelse", "Afsender", "Modtager", "Beløb", "Saldo", "Kategori", "Valuta"]
+        if multi_source:
+            disabled_cols.append("Kilde")
         edited = st.data_editor(
             editor_df,
             column_config={"✓": st.column_config.CheckboxColumn("✓", default=False, width="small")},
-            disabled=["Dato", "Navn/Beskrivelse", "Afsender", "Modtager", "Beløb", "Saldo", "Kategori", "Valuta"],
+            disabled=disabled_cols,
             hide_index=True,
             use_container_width=True,
         )
