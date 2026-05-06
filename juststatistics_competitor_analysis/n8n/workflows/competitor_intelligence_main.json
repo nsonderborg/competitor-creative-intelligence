@@ -1,0 +1,624 @@
+{
+  "name": "Competitor Creative Intelligence",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "competitor-intelligence",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "eeb75047-f6f1-4fb4-89ac-9c72aa8c33c0",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        208
+      ],
+      "webhookId": "comp-intel-main-01"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst input = raw.body || raw;\nif (!input.brand_name) throw new Error('brand_name is required');\nif (!input.product_category) throw new Error('product_category is required');\nif (!input.ad_screenshots || input.ad_screenshots.length === 0) throw new Error('ad_screenshots array is required and must not be empty');\nif (!input.review_texts || input.review_texts.length === 0) throw new Error('review_texts array is required and must not be empty');\nconst runId = input.run_id || (Date.now().toString(36) + Math.random().toString(36).slice(2));\nreturn [{ json: { ...input, run_id: runId, started_at: input.started_at || new Date().toISOString() } }];"
+      },
+      "id": "25be5484-fa00-4c39-9170-d231ac4c7f5d",
+      "name": "Input Validator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// \u26a0 PASTE FULL SYSTEM PROMPT FROM PROMPTS.md \u2192 Agent 1: Vision Analyst\nconst SYSTEM_PROMPT = `You are a senior creative strategist at a performance marketing agency specialising in\ne-commerce static ads. Your specialty is competitive creative intelligence \u2014 you\ndeconstruct competitor ad creatives with surgical precision to extract patterns that\ninform better-performing ads.\n\nYou will be given a single static ad image (Meta Ads Library screenshot). Your task\nis to produce a structured analysis that answers: what is this ad trying to do, how\nis it doing it, and what can be learned from it?\n\nOutput ONLY valid JSON. Do not add any explanation text outside the JSON object.\n\nAnalyse the following dimensions:\n\nVISUAL_STRUCTURE\n- layout_type: one of [single_image, carousel_frame, split_panel, before_after,\n  product_closeup, lifestyle_scene, ugc_style, text_heavy, infographic, comparison]\n- dominant_colors: array of up to 3 hex codes or color names (e.g. \"deep navy\", \"#FF4500\")\n- image_composition: describe the main visual hierarchy in one sentence\n- text_to_image_ratio: one of [text_dominant, balanced, image_dominant]\n- has_human_face: boolean\n- face_emotion: if has_human_face, one of [happy, surprised, neutral, pain, aspirational,\n  before_state, after_state] else null\n\nCOPY_ANALYSIS\n- headline: exact text of the primary headline (largest font element), or null\n- subheadline: exact text of secondary headline, or null\n- body_copy: exact text of body copy if present, or null\n- cta_text: exact call-to-action button text, or null\n- headline_formula: classify the headline structure as one of [\n    number_list,\n    question,\n    bold_claim,\n    social_proof,\n    transformation,\n    pain_agitate,\n    curiosity_gap,\n    direct_offer,\n    authority,\n    comparison,\n    urgency,\n    how_to\n  ]\n- tone: one of [urgent, playful, premium, clinical, conversational, authoritative,\n  empathetic, provocative]\n\nOFFER_AND_HOOK\n- primary_hook: the core psychological lever being pulled \u2014 write this as a\n  single sentence starting with \"Targets customers who...\"\n  (e.g. \"Targets customers who feel embarrassed by X and want a discreet solution\")\n- value_proposition: the explicit or implicit promise being made in one sentence\n- offer_type: one of [discount_percent, discount_amount, free_shipping, bundle,\n  free_trial, social_proof_only, transformation_promise, no_explicit_offer]\n- discount_value: extract if present (e.g. \"40%\", \"$20 off\"), else null\n- urgency_trigger: extract if present (e.g. \"Today only\", \"48 hours\"), else null\n- scarcity_trigger: extract if present (e.g. \"Only 12 left\"), else null\n\nAUDIENCE_SIGNALS\n- inferred_target_demographic: describe in one sentence (e.g. \"Women 25-45 dealing with\n  postpartum hair loss seeking a non-pharmaceutical solution\")\n- pain_point_addressed: the specific problem this ad is speaking to, max 15 words\n- desire_addressed: the positive outcome being promised, max 15 words\n- awareness_stage: one of [problem_unaware, problem_aware, solution_aware,\n  product_aware, most_aware]\n\nBRAND_SIGNALS\n- brand_name: extract if visible, else null\n- brand_tier_signal: one of [budget, mid_market, premium, luxury] based on visual cues\n- trust_elements: array of trust signals present \u2014 choose from [\n    reviews_count, star_rating, celebrity_endorsement, press_logos,\n    certification_badge, money_back_guarantee, before_after_results,\n    clinical_study_reference, ugc_testimonial, influencer_reference\n  ] or empty array\n- competitor_comparison: boolean \u2014 does the ad reference or imply comparison to\n  a competing product/brand?\n\nCREATIVE_QUALITY\n- production_quality: one of [low, medium, high, very_high]\n- authenticity_signal: one of [polished_brand, ugc_authentic, ugc_staged,\n  hybrid, stock_photo]\n- estimated_ad_spend_tier: one of [testing, scaling, established_winner] \u2014\n  infer from polish level, offer prominence, and creative complexity`;\n\nconst input = $('Input Validator').first().json;\nreturn (input.ad_screenshots || []).map(function(screenshot, index) {\n  var imageSource = screenshot.source_type === 'url'\n    ? { type: 'url', url: screenshot.data }\n    : { type: 'base64', media_type: screenshot.media_type || 'image/jpeg', data: screenshot.data };\n  return {\n    json: {\n      ad_index: index,\n      competitor_name: screenshot.competitor_name || ('Competitor ' + (index + 1)),\n      request_body: {\n        model: 'claude-sonnet-4-6',\n        max_tokens: 2048,\n        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],\n        messages: [{\n          role: 'user',\n          content: [\n            { type: 'image', source: imageSource },\n            { type: 'text', text: 'Analyse this competitor ad creative for brand: ' + input.brand_name }\n          ]\n        }]\n      }\n    }\n  };\n});\n"
+      },
+      "id": "62796ad2-d679-4e66-a206-5a4ced939ac8",
+      "name": "Prepare Ad Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "anthropic-beta",
+              "value": "prompt-caching-2024-07-31"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.request_body }}",
+        "options": {
+          "response": {
+            "response": {}
+          },
+          "timeout": 120000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "cc8caa73-2aea-4b8b-8c84-f2a4cb15e269",
+      "name": "Vision Analyst API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "RjWZUb87d2SFJPv7",
+          "name": "Anthropic API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(function(item, i) {\n  var response = item.json;\n  if (response.error) throw new Error('Claude API error on ad ' + i + ': ' + JSON.stringify(response.error));\n  if (!response.content || !response.content[0]) throw new Error('Empty Claude response on ad ' + i);\n  var rawText = response.content[0].text;\n  var parsed;\n  try {\n    var cleaned = rawText.replace(/^```json\\s*/i, '').replace(/\\s*```$/, '').trim();\n    parsed = JSON.parse(cleaned);\n  } catch(e) {\n    throw new Error('Failed to parse Vision Analyst JSON for ad ' + i + ': ' + e.message + '\\nRaw: ' + rawText.slice(0, 300));\n  }\n  // Normalise top-level keys to lowercase snake_case (Claude sometimes returns UPPER_CASE section headers)\n  var normalised = {};\n  Object.keys(parsed).forEach(function(k) { normalised[k.toLowerCase()] = parsed[k]; });\n  var usage = response.usage || {};\n  return {\n    json: {\n      ad_index: i,\n      competitor_name: item.json.competitor_name || ('Competitor ' + (i + 1)),\n      model_used: response.model || 'claude-sonnet-4-6',\n      input_tokens: usage.input_tokens || 0,\n      output_tokens: usage.output_tokens || 0,\n      cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,\n      cache_read_input_tokens: usage.cache_read_input_tokens || 0,\n      analysis: normalised\n    }\n  };\n});\n"
+      },
+      "id": "1eed11de-7ec5-49fc-8fcd-6c5720505d8f",
+      "name": "Parse Vision Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var analyses = $input.all().filter(function(a) { return !a.json.error && a.json.analysis; });\nvar layoutCounts = {}, formulaCounts = {}, offerTypeCounts = {}, toneCounts = {}, spendTierCounts = {}, trustElementCounts = {};\nvar faceCount = 0, comparisonCount = 0;\nvar adSummaries = [];\nfor (var i = 0; i < analyses.length; i++) {\n  var a = analyses[i].json.analysis;\n  var vs = a.visual_structure, ca = a.copy_analysis, oah = a.offer_and_hook, bs = a.brand_signals, cq = a.creative_quality;\n  layoutCounts[vs.layout_type] = (layoutCounts[vs.layout_type] || 0) + 1;\n  if (ca.headline_formula) formulaCounts[ca.headline_formula] = (formulaCounts[ca.headline_formula] || 0) + 1;\n  if (oah.offer_type) offerTypeCounts[oah.offer_type] = (offerTypeCounts[oah.offer_type] || 0) + 1;\n  if (ca.tone) toneCounts[ca.tone] = (toneCounts[ca.tone] || 0) + 1;\n  if (cq.estimated_ad_spend_tier) spendTierCounts[cq.estimated_ad_spend_tier] = (spendTierCounts[cq.estimated_ad_spend_tier] || 0) + 1;\n  if (vs.has_human_face) faceCount++;\n  if (bs.competitor_comparison) comparisonCount++;\n  (bs.trust_elements || []).forEach(function(te) { trustElementCounts[te] = (trustElementCounts[te] || 0) + 1; });\n  adSummaries.push({ competitor: analyses[i].json.competitor_name || 'Unknown', layout: vs.layout_type, headline: ca.headline || '(none)', offer: oah.offer_type, hook_formula: ca.headline_formula, spend_tier: cq.estimated_ad_spend_tier, primary_hook: oah.primary_hook, tone: ca.tone });\n}\nfunction top(obj, n) { return Object.entries(obj).sort(function(a,b){return b[1]-a[1];}).slice(0,n||3).map(function(e){return e[0]+' ('+e[1]+'x)';}).join(', '); }\nvar total = analyses.length;\nvar summary = 'COMPETITOR AD ANALYSIS - ' + total + ' ads\\n\\nVISUAL PATTERNS:\\n- Dominant layouts: ' + top(layoutCounts) + '\\n- Ads with human faces: ' + faceCount + '/' + total + '\\n- Competitor comparisons: ' + comparisonCount + '/' + total + '\\n\\nCOPY PATTERNS:\\n- Headline formulas: ' + top(formulaCounts) + '\\n- Tones: ' + top(toneCounts) + '\\n- Offer types: ' + top(offerTypeCounts) + '\\n- Trust elements: ' + top(trustElementCounts) + '\\n\\nSPEND TIERS:\\n' + Object.entries(spendTierCounts).map(function(e){return '- '+e[0]+': '+e[1]+' ads';}).join('\\n') + '\\n\\nPER-AD HOOKS:\\n' + adSummaries.map(function(ad, i) { return '[Ad '+(i+1)+'] '+ad.competitor+' | '+ad.hook_formula+' | '+ad.tone+'\\n  Headline: \"'+ad.headline+'\"\\n  Hook: '+ad.primary_hook; }).join('\\n\\n');\nreturn [{ json: { vision_analysis_summary: summary, ad_summaries: adSummaries, total_ads_analysed: total, pattern_counts: { layouts: layoutCounts, headline_formulas: formulaCounts, offer_types: offerTypeCounts, tones: toneCounts, spend_tiers: spendTierCounts } } }];"
+      },
+      "id": "9ebcdc78-0f5c-4aa4-8cf0-8d2db37132b2",
+      "name": "Vision Results Merger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const SYSTEM_PROMPT = `You are a consumer insight specialist. Your job is to read raw customer reviews and\nextract structured intelligence about what customers truly want, fear, and complain about.\n\nYou will receive a JSON array of review texts. Process ALL of them. For each review,\noutput a classification object. Then output aggregate summaries.\n\nOutput ONLY valid JSON. No explanation text outside the JSON.\n\nFor each review, classify:\n\nSENTIMENT\n- score: integer 1-5 (1=very negative, 5=very positive)\n- sentiment_label: one of [rave, positive, neutral, negative, rant]\n\nPAIN_POINT (what problem does the reviewer describe?)\n- category: one of [\n    quality_failure,        // product broke, poor materials, doesn't work\n    expectation_mismatch,   // not as described, misleading\n    shipping_packaging,     // slow, damaged, missing\n    customer_service,       // rude, unresponsive, broken process\n    price_value,            // too expensive for what it is\n    usability,              // hard to use, confusing instructions\n    side_effects,           // negative physical/emotional reaction\n    sizing_fit,             // wrong size, fit issues\n    no_pain_point           // positive review, no complaint\n  ]\n- pain_verbatim: the reviewer's exact words describing the pain (max 30 words),\n  or null if no pain expressed\n\nDESIRE (what outcome does the reviewer want or celebrate achieving?)\n- category: one of [\n    appearance_improvement,   // look better, confidence\n    performance_outcome,      // runs faster, lifts more, sleeps better\n    convenience,              // saves time, easy to use\n    status_social,            // impress others, feel special\n    health_wellness,          // feel healthier, pain relief\n    value_for_money,          // worth every penny\n    reliability_trust,        // consistent, dependable\n    transformation,           // before/after, life changed\n    no_desire_expressed       // complaint-only review\n  ]\n- desire_verbatim: the reviewer's exact words expressing the desire or celebration\n  (max 30 words), or null if none expressed\n\nHOOK_POTENTIAL\n- usable_as_hook: boolean \u2014 is there a sentence here that could become ad copy?\n- hook_candidate: if usable_as_hook, extract the exact phrase (max 20 words), else null\n- hook_type: if usable_as_hook, one of [social_proof_statement, transformation_claim,\n  pain_relief_statement, superlative_claim, emotional_outcome], else null\n\nAfter processing all reviews, output aggregate data:\n\nAGGREGATE\n- total_reviews: integer\n- average_sentiment_score: float\n- top_pain_points: top 3 pain categories by frequency, each with count\n- top_desires: top 3 desire categories by frequency, each with count\n- top_hook_candidates: up to 5 best hook_candidate strings, ranked by emotional intensity\n- brand_summary_insight: one paragraph (max 60 words) summarising what customers\n  most love and most struggle with \u2014 write in the tone of a brand strategist briefing\n  a creative team`;\n\nconst input = $('Input Validator').first().json;\nconst reviews = input.review_texts || [];\nconst BATCH_SIZE = 20;\nconst batches = [];\nfor (let i = 0; i < reviews.length; i += BATCH_SIZE) {\n  batches.push(reviews.slice(i, i + BATCH_SIZE));\n}\nreturn batches.map((batch, index) => ({\n  json: {\n    batch_index: index,\n    review_count: batch.length,\n    request_body: {\n      model: 'claude-haiku-4-5-20251001',\n      max_tokens: 8192,\n      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],\n      messages: [{\n        role: 'user',\n        content: `Classify these ${batch.length} customer reviews for brand: ${input.brand_name}\\nSource: ${input.review_source || 'trustpilot'}\\n\\nReviews:\\n${JSON.stringify(batch.map(r => r.text || r))}`\n      }]\n    }\n  }\n}));\n"
+      },
+      "id": "d0930905-7593-4c6a-a0e7-36a9285a74ee",
+      "name": "Prepare Review Batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "anthropic-beta",
+              "value": "prompt-caching-2024-07-31"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.request_body }}",
+        "options": {
+          "timeout": 60000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "54dc1ea9-ac6f-4093-9b9a-69964503b0b0",
+      "name": "Review Miner API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        400
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "RjWZUb87d2SFJPv7",
+          "name": "Anthropic API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map(function(item, i) {\n  var response = item.json;\n  if (response.error) throw new Error('Claude API error on review batch ' + i + ': ' + JSON.stringify(response.error));\n  if (!response.content || !response.content[0]) throw new Error('Empty Claude response on review batch ' + i);\n  var rawText = response.content[0].text;\n  var parsed;\n  try {\n    var cleaned = rawText.replace(/^```json\\s*/i, '').replace(/\\s*```$/, '').trim();\n    parsed = JSON.parse(cleaned);\n  } catch(e) {\n    throw new Error('Failed to parse Review Miner JSON for batch ' + i + ': ' + e.message);\n  }\n  var usage = response.usage || {};\n  return {\n    json: {\n      batch_index: i,\n      model_used: 'claude-haiku-4-5-20251001',\n      input_tokens: usage.input_tokens || 0,\n      output_tokens: usage.output_tokens || 0,\n      cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,\n      cache_read_input_tokens: usage.cache_read_input_tokens || 0,\n      result: parsed\n    }\n  };\n});"
+      },
+      "id": "4d6a1976-b9bb-4b8f-88bf-6faf289d253e",
+      "name": "Parse Review Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var batches = $input.all();\nvar allReviews = [], painCounts = {}, desireCounts = {}, allHooks = [];\nvar totalSentiment = 0, totalReviews = 0, bestInsight = '';\nfor (var b = 0; b < batches.length; b++) {\n  var result = batches[b].json.result;\n  if (!result || batches[b].json.error) continue;\n  var reviews = result.reviews || [];\n  for (var r = 0; r < reviews.length; r++) {\n    var rev = reviews[r];\n    allReviews.push(rev);\n    totalSentiment += rev.sentiment.score;\n    totalReviews++;\n    var pain = rev.pain_point.category;\n    if (pain !== 'no_pain_point') painCounts[pain] = (painCounts[pain] || 0) + 1;\n    var desire = rev.desire.category;\n    if (desire !== 'no_desire_expressed') desireCounts[desire] = (desireCounts[desire] || 0) + 1;\n    if (rev.hook_potential.usable_as_hook && rev.hook_potential.hook_candidate) allHooks.push(rev.hook_potential.hook_candidate);\n  }\n  if (result.aggregate && result.aggregate.brand_summary_insight) bestInsight = result.aggregate.brand_summary_insight;\n}\nfunction sortByCount(obj) {\n  return Object.entries(obj).sort(function(a,b){return b[1]-a[1];}).map(function(e) {\n    var cat = e[0], count = e[1];\n    var verbatim = null;\n    for (var i = 0; i < allReviews.length; i++) {\n      if (allReviews[i].pain_point.category === cat && allReviews[i].pain_point.pain_verbatim) { verbatim = allReviews[i].pain_point.pain_verbatim; break; }\n      if (allReviews[i].desire.category === cat && allReviews[i].desire.desire_verbatim) { verbatim = allReviews[i].desire.desire_verbatim; break; }\n    }\n    return { category: cat, count: count, percentage: totalReviews > 0 ? Math.round(count/totalReviews*1000)/10 : 0, best_verbatim: verbatim };\n  });\n}\nvar uniqueHooks = allHooks.filter(function(h, i, arr) { return arr.indexOf(h) === i; }).slice(0, 10);\nreturn [{ json: { total_reviews_processed: totalReviews, overall_average_sentiment: totalReviews > 0 ? Math.round(totalSentiment/totalReviews*100)/100 : 0, top_pain_points: sortByCount(painCounts).slice(0, 5), top_desires: sortByCount(desireCounts).slice(0, 5), top_hook_candidates: uniqueHooks, brand_summary_insight: bestInsight } }];"
+      },
+      "id": "73532608-d27c-4afa-969f-2495ebe8a587",
+      "name": "Review Aggregator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        400
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "16e88aab-cde8-44b6-bba0-e43642924b96",
+      "name": "Merge Branches",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        880,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const SYSTEM_PROMPT = `You are a direct response copywriter and creative strategist specialising in e-commerce\nstatic ads on Meta (Facebook/Instagram). You have studied over 10,000 winning ad\ncreatives. You know exactly which psychological triggers, headline formulas, and copy\nstructures drive clicks, stops, and conversions for cold audiences.\n\nYour output is used directly by a creative team to produce static ad creatives. Hooks\nyou write must be specific, testable, and rooted in real customer language \u2014 not generic\nmarketing-speak.\n\nYou will receive:\n1. COMPETITOR_VISUAL_PATTERNS \u2014 a synthesis of what competitor ads look like and what\n   creative approaches they use\n2. CUSTOMER_INTELLIGENCE \u2014 classified pain points, desires, and verbatim phrases from\n   real customer reviews\n3. BRAND_BRIEF \u2014 the brand name, product category, and positioning intent\n\nYour task: generate 12 hooks, each representing a distinct creative angle.\n\nRULES FOR HOOKS:\n- Each hook must target a DIFFERENT psychological entry point\n- Hooks must be concrete and specific \u2014 no vague claims like \"amazing results\"\n- At least 3 hooks must use verbatim or near-verbatim language from real reviews\n- At least 2 hooks must counter a competitor pattern (e.g. \"Unlike X, we Y\")\n- At least 2 hooks must use a question format targeting a specific pain moment\n- Hooks should be 4-12 words. If a hook is longer, it must earn its length.\n- Do NOT write full ads \u2014 write only the headline/hook line\n\nFor each hook, output:\n\n- hook_text: the actual copy line\n- hook_formula: one of [\n    number_list, question, bold_claim, social_proof, transformation,\n    pain_agitate, curiosity_gap, direct_offer, authority, comparison,\n    urgency, how_to, verbatim_lift, counter_positioning\n  ]\n- psychological_trigger: one of [\n    fear_of_missing_out, social_proof, authority_credibility,\n    loss_aversion, identity_aspiration, pain_relief,\n    curiosity, reciprocity, scarcity, transformation_desire\n  ]\n- target_pain_point: the specific pain point this hook addresses (from review intelligence)\n- target_desire: the specific desire this hook speaks to\n- source_evidence: explain in one sentence WHY this hook will work \u2014 cite either a\n  competitor pattern or a customer review phrase as evidence\n- recommended_visual_pairing: describe in one sentence what visual would pair best\n  with this hook (e.g. \"Before/after split with product visible in after panel\")\n- confidence_score: integer 1-10 based on strength of evidence and creative quality\n  - 9-10: directly lifted from strong review language or proven competitor formula\n  - 7-8: grounded in review themes, solid formula\n  - 5-6: speculative creative angle worth testing\n  - 1-4: exploratory stretch \u2014 flag as low-confidence test\n\nAfter all hooks, output a STRATEGY_BRIEF of max 100 words summarising:\n- The 2-3 dominant creative themes you recommend pursuing first\n- The competitor creative gap (what competitors are NOT doing that represents opportunity)\n- The one hook you recommend as the first creative to produce, and why\n\nOutput ONLY valid JSON.`;\n\nconst input = $('Input Validator').first().json;\nconst vision = $('Vision Results Merger').first().json;\nconst reviews = $('Review Aggregator').first().json;\n\nconst userMessage = `Brand: ${input.brand_name}\nProduct category: ${input.product_category}\nPositioning intent: ${input.positioning_intent || 'Not specified'}\n\nCOMPETITOR_VISUAL_PATTERNS:\n${vision.vision_analysis_summary}\n\nCUSTOMER_INTELLIGENCE:\nTotal reviews: ${reviews.total_reviews_processed}\nAverage sentiment: ${reviews.overall_average_sentiment}/5\n\nTop pain points:\n${JSON.stringify(reviews.top_pain_points, null, 2)}\n\nTop desires:\n${JSON.stringify(reviews.top_desires, null, 2)}\n\nBrand insight: ${reviews.brand_summary_insight}\n\nTOP_REVIEW_HOOKS_RAW:\n${(reviews.top_hook_candidates || []).map((h, i) => `${i + 1}. \"${h}\"`).join('\\n')}\n\nGenerate 12 hooks as specified.`;\n\nreturn [{\n  json: {\n    request_body: {\n      model: 'claude-sonnet-4-6',\n      max_tokens: 4096,\n      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],\n      messages: [{ role: 'user', content: userMessage }]\n    }\n  }\n}];\n"
+      },
+      "id": "9da3f2f3-bbb0-4ed8-a83e-63d25944abf7",
+      "name": "Prepare Hook Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "anthropic-beta",
+              "value": "prompt-caching-2024-07-31"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.request_body }}",
+        "options": {
+          "timeout": 120000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "3b59b750-f616-434e-87c4-11c5de5dca5e",
+      "name": "Hook Strategist API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1328,
+        208
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "RjWZUb87d2SFJPv7",
+          "name": "Anthropic API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "var response = $input.first().json;\nif (response.error) throw new Error('Hook Strategist API error: ' + JSON.stringify(response.error));\nif (!response.content || !response.content[0]) throw new Error('Empty response from Hook Strategist');\nvar rawText = response.content[0].text;\nvar parsed;\ntry {\n  var cleaned = rawText.replace(/^```json\\s*/i, '').replace(/\\s*```$/, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch(e) {\n  throw new Error('Failed to parse Hook Strategist JSON: ' + e.message + '\\nRaw: ' + rawText.slice(0, 300));\n}\nvar usage = response.usage || {};\nreturn [{ json: { ...parsed, input_tokens: usage.input_tokens || 0, output_tokens: usage.output_tokens || 0, model_used: response.model || 'claude-sonnet-4-6' } }];"
+      },
+      "id": "c77c1bf5-946a-475c-aa50-654f2f9ba4a5",
+      "name": "Parse Hook Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const SYSTEM_PROMPT = `You are a senior brand strategist writing a competitive intelligence brief for a\ncreative team at a performance marketing agency. Your briefs are legendary for being\nspecific, actionable, and jargon-free. Creative directors read them and immediately\nknow what to make.\n\nYou will receive structured data from four sources:\n1. Vision analysis of competitor ads (what they look like, how they're structured)\n2. Customer review intelligence (pain points, desires, verbatim phrases)\n3. Generated hooks (ranked creative angles with evidence)\n4. Run metadata (brand, competitor list, date)\n\nWrite a complete Brand Research Report in markdown. The report should read like a\npremium agency deliverable. It should be skimmable in 5 minutes but contain enough\ndepth for a 30-minute creative briefing.\n\nREQUIRED SECTIONS (in this order):\n\n# Brand Research Report: [Brand Name]\n*Generated: [date] | [N] competitor ads analysed | [N] reviews processed*\n\n## Executive Summary\n2-3 paragraph narrative covering: competitive landscape snapshot, biggest creative\nopportunity, most urgent pain point to address. No bullet points in this section \u2014\nwrite in clear, confident prose.\n\n## Competitor Creative Landscape\n### Visual Patterns\n- What visual approaches dominate (layouts, color palettes, human vs product focus)\n- What no competitor is doing (the gap)\n- Production quality distribution across the competitor set\n\n### Copy Patterns\n- Dominant headline formulas in use\n- Common offer types\n- Tone and messaging conventions\n\n### Creative Maturity Assessment\nRate the competitor set: [Early-stage testing | Active scaling | Saturated market]\nInclude a 2-3 sentence justification.\n\n## Customer Intelligence\n### Pain Point Hierarchy\nList the top 5 pain points in order of frequency, each with:\n- The pain category name\n- Frequency count and percentage\n- The most emotionally resonant verbatim quote illustrating it (from review data)\n\n### Desire Hierarchy\nList the top 5 desires in order of frequency, same format as pain points.\n\n### Voice of Customer \u2014 Best Raw Phrases\nA curated list of 8-10 verbatim review phrases that should be considered for direct\nuse in ad copy. Format as a blockquote list. Add a one-line note on the creative\napplication for each.\n\n## Hook Recommendations\nPresent all hooks in a formatted table:\n\n| Rank | Hook | Formula | Confidence | Recommended Visual |\n|------|------|---------|------------|-------------------|\n\nBelow the table, expand on the top 3 hooks with a paragraph each explaining the\nstrategic rationale.\n\n## Creative Brief: First Ad to Produce\nA complete one-page creative brief for the single highest-confidence first ad:\n\n**Hook:** [exact text]\n**Visual direction:** [2-3 sentences]\n**Target audience moment:** [describe the specific moment/context this person is in]\n**Psychological mechanism:** [explain why this will stop the scroll]\n**KPI to watch:** [CTR threshold, or engagement signal]\n**Do NOT include:** [creative directions to avoid based on competitor saturation]\n\n## Recommended Testing Roadmap\nA prioritised 3-creative test sequence:\n1. Creative A \u2014 [hook + visual approach] \u2014 tests [hypothesis]\n2. Creative B \u2014 [hook + visual approach] \u2014 tests [hypothesis]\n3. Creative C \u2014 [hook + visual approach] \u2014 tests [hypothesis]\n\n## Appendix: Raw Competitor Ad Data\nFor each analysed ad, a compact summary row:\n| Ad | Layout | Headline | Offer | Hook Type | Spend Tier |\n|----|--------|----------|-------|-----------|------------|\n\n---\n\nFORMATTING RULES:\n- Use markdown headers, tables, and blockquotes as shown above\n- No emoji\n- Keep tone professional but direct \u2014 this is an agency doc, not a blog post\n- All verbatim quotes must be clearly attributed as [Review verbatim] to distinguish\n  from your own analysis\n- If data is missing or thin, flag it explicitly rather than padding with speculation\n- Target length: 800-1200 words (not counting the appendix table)`;\n\nconst input = $('Input Validator').first().json;\nconst vision = $('Vision Results Merger').first().json;\nconst reviews = $('Review Aggregator').first().json;\nconst hooks = $('Parse Hook Response').first().json;\n\nconst userMessage = `Brand: ${input.brand_name}\nDate: ${new Date().toISOString().slice(0, 10)}\nAd images analysed: ${vision.total_ads_analysed}\nReviews processed: ${reviews.total_reviews_processed}\nReview sources: ${input.review_source || 'trustpilot'}\n\nVISION_ANALYSES:\n${vision.vision_analysis_summary}\n\nREVIEW_AGGREGATE:\n${JSON.stringify({\n  total: reviews.total_reviews_processed,\n  average_sentiment: reviews.overall_average_sentiment,\n  top_pain_points: reviews.top_pain_points,\n  top_desires: reviews.top_desires,\n  top_hook_candidates: reviews.top_hook_candidates,\n  brand_summary_insight: reviews.brand_summary_insight\n}, null, 2)}\n\nHOOKS:\n${JSON.stringify(hooks.hooks, null, 2)}\n\nSTRATEGY_BRIEF:\n${JSON.stringify(hooks.strategy_brief, null, 2)}\n\nGenerate the full Brand Research Report.`;\n\nreturn [{\n  json: {\n    request_body: {\n      model: 'claude-sonnet-4-6',\n      max_tokens: 8192,\n      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],\n      messages: [{ role: 'user', content: userMessage }]\n    }\n  }\n}];\n"
+      },
+      "id": "1c74ffc8-8b1c-44b4-bbbd-861e76fd799a",
+      "name": "Prepare Report Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "anthropic-beta",
+              "value": "prompt-caching-2024-07-31"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.request_body }}",
+        "options": {
+          "timeout": 180000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "723a5308-deea-4a49-a0c8-f55987fc1b07",
+      "name": "Report Writer API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1984,
+        208
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "RjWZUb87d2SFJPv7",
+          "name": "Anthropic API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "var response = $input.first().json;\nif (response.error) throw new Error('Report Writer API error: ' + JSON.stringify(response.error));\nif (!response.content || !response.content[0]) throw new Error('Empty response from Report Writer');\nvar usage = response.usage || {};\nreturn [{ json: { brand_report: response.content[0].text, input_tokens: usage.input_tokens || 0, output_tokens: usage.output_tokens || 0, model_used: response.model || 'claude-sonnet-4-6' } }];"
+      },
+      "id": "41c7ea0f-0256-4649-9067-68ce19b102ed",
+      "name": "Parse Report Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2208,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "var PRICE = { sonnet: { input: 3.00, output: 15.00, cacheWrite: 3.75, cacheRead: 0.30 }, haiku: { input: 0.80, output: 4.00, cacheWrite: 1.00, cacheRead: 0.08 } };\nfunction cost(inp, out, cw, cr, model) { var p = PRICE[model]; var reg = Math.max(0, inp - (cw||0) - (cr||0)); return reg*p.input/1e6 + out*p.output/1e6 + (cw||0)*p.cacheWrite/1e6 + (cr||0)*p.cacheRead/1e6; }\nfunction sumTok(items) { return items.reduce(function(acc, item) { return { input: acc.input+(item.json.input_tokens||0), output: acc.output+(item.json.output_tokens||0), cacheWrite: acc.cacheWrite+(item.json.cache_creation_input_tokens||0), cacheRead: acc.cacheRead+(item.json.cache_read_input_tokens||0) }; }, {input:0,output:0,cacheWrite:0,cacheRead:0}); }\nvar inputNode = $('Input Validator').first().json;\nvar visionMerger = $('Vision Results Merger').first().json;\nvar reviewAgg = $('Review Aggregator').first().json;\nvar hooksNode = $('Parse Hook Response').first().json;\nvar reportNode = $('Parse Report Response').first().json;\nvar visionItems = $('Parse Vision Response').all();\nvar reviewItems = $('Parse Review Response').all();\nvar vt = sumTok(visionItems), rt = sumTok(reviewItems);\nvar totalCost = cost(vt.input,vt.output,vt.cacheWrite,vt.cacheRead,'sonnet') + cost(rt.input,rt.output,rt.cacheWrite,rt.cacheRead,'haiku') + cost(hooksNode.input_tokens||0,hooksNode.output_tokens||0,0,0,'sonnet') + cost(reportNode.input_tokens||0,reportNode.output_tokens||0,0,0,'sonnet');\nvar completedAt = new Date().toISOString();\nvar durationSeconds = Math.round((new Date(completedAt)-new Date(inputNode.started_at))/1000);\nvar sortedHooks = (hooksNode.hooks||[]).slice().sort(function(a,b){return b.confidence_score-a.confidence_score;});\nreturn [{ json: { run_id: inputNode.run_id, brand_name: inputNode.brand_name, started_at: inputNode.started_at, completed_at: completedAt, duration_seconds: durationSeconds, hooks: sortedHooks, brand_report: reportNode.brand_report || '', strategy_brief: hooksNode.strategy_brief || null, run_stats: { ads_analysed: visionMerger.total_ads_analysed||visionItems.length, reviews_processed: reviewAgg.total_reviews_processed||0, hooks_generated: sortedHooks.length, total_input_tokens: vt.input+rt.input+(hooksNode.input_tokens||0)+(reportNode.input_tokens||0), total_output_tokens: vt.output+rt.output+(hooksNode.output_tokens||0)+(reportNode.output_tokens||0), estimated_cost_usd: Math.round(totalCost*10000)/10000, sonnet_calls: visionItems.length+2, haiku_calls: reviewItems.length } } }];"
+      },
+      "id": "d84f9971-c503-4d1a-87a1-1da3d0831d2f",
+      "name": "Output Formatter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2432,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO run_history (run_id, brand_name, started_at, completed_at, status, ads_analysed, reviews_processed, hooks_generated, total_input_tokens, total_output_tokens, estimated_cost_usd, sonnet_calls, haiku_calls) VALUES ($1,$2,$3,$4,'success',$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (run_id) DO NOTHING",
+        "options": {}
+      },
+      "id": "3176e1b5-1ab1-4f1e-8831-e545b759f710",
+      "name": "Save Run History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2640,
+        208
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $('Output Formatter').first().json }}",
+        "options": {}
+      },
+      "id": "3539c0f0-7417-4e15-ba5b-44e9b2f32639",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2864,
+        208
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Input Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Input Validator": {
+      "main": [
+        [
+          {
+            "node": "Prepare Ad Items",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Review Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Ad Items": {
+      "main": [
+        [
+          {
+            "node": "Vision Analyst API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vision Analyst API": {
+      "main": [
+        [
+          {
+            "node": "Parse Vision Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Vision Response": {
+      "main": [
+        [
+          {
+            "node": "Vision Results Merger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vision Results Merger": {
+      "main": [
+        [
+          {
+            "node": "Merge Branches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Review Batches": {
+      "main": [
+        [
+          {
+            "node": "Review Miner API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review Miner API": {
+      "main": [
+        [
+          {
+            "node": "Parse Review Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Review Response": {
+      "main": [
+        [
+          {
+            "node": "Review Aggregator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review Aggregator": {
+      "main": [
+        [
+          {
+            "node": "Merge Branches",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Branches": {
+      "main": [
+        [
+          {
+            "node": "Prepare Hook Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Hook Request": {
+      "main": [
+        [
+          {
+            "node": "Hook Strategist API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hook Strategist API": {
+      "main": [
+        [
+          {
+            "node": "Parse Hook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Hook Response": {
+      "main": [
+        [
+          {
+            "node": "Prepare Report Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Report Request": {
+      "main": [
+        [
+          {
+            "node": "Report Writer API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Writer API": {
+      "main": [
+        [
+          {
+            "node": "Parse Report Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Report Response": {
+      "main": [
+        [
+          {
+            "node": "Output Formatter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Output Formatter": {
+      "main": [
+        [
+          {
+            "node": "Save Run History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Run History": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "staticData": null
+}

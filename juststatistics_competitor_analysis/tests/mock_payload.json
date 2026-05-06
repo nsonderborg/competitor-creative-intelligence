@@ -1,0 +1,142 @@
+{
+  "run_id": "550e8400-e29b-41d4-a716-446655440001",
+  "brand_name": "GlowSkin",
+  "product_category": "skincare serums",
+  "positioning_intent": "premium natural alternative to clinical skincare brands",
+  "started_at": "2026-05-02T10:00:00Z",
+  "competitor_urls": [
+    "https://www.facebook.com/ads/library/?id=123456789",
+    "https://www.facebook.com/ads/library/?id=987654321"
+  ],
+  "ad_screenshots": [
+    {
+      "source_type": "base64",
+      "media_type": "image/png",
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAXklEQVR4nO3PMQ0AMAzAsPInvYLYYVWKESTzjhsd8KsBrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BbQHKU9LC7/CP1AAAAABJRU5ErkJggg==",
+      "competitor_name": "DermGlow",
+      "ad_id": "meta_ad_001"
+    }
+  ],
+  "review_texts": [
+    {
+      "text": "I've tried literally everything for my skin \u2014 prescription retinoids, expensive serums, the lot. Nothing worked until this. After three weeks my skin is visibly clearer and my husband actually noticed without me pointing it out. I cried.",
+      "source": "trustpilot",
+      "rating": 5,
+      "date": "2026-04-20"
+    },
+    {
+      "text": "Finally feel confident leaving the house without makeup. That's something I haven't been able to say in five years. Whatever is in this serum, it works.",
+      "source": "trustpilot",
+      "rating": 5,
+      "date": "2026-04-18"
+    },
+    {
+      "text": "Good product, noticed subtle improvement in texture after about a month. Packaging is nice. Bit pricey for the size but I'd buy again.",
+      "source": "trustpilot",
+      "rating": 4,
+      "date": "2026-04-15"
+    },
+    {
+      "text": "The before/after photos on their ads are not exaggerated at all. I was sceptical but the results are genuinely visible in the mirror. Week 6 now and still improving.",
+      "source": "amazon",
+      "rating": 5,
+      "date": "2026-04-10"
+    },
+    {
+      "text": "Ordered based on the ads which showed dramatic results in 2 weeks. My skin looks exactly the same as before. Not bad, just no visible change after 6 weeks. Misleading marketing.",
+      "source": "trustpilot",
+      "rating": 2,
+      "date": "2026-04-08"
+    },
+    {
+      "text": "Arrived with the pump broken. Product leaked everywhere inside the box. Customer service took 4 days to respond and offered a 10% discount instead of a replacement. Won't order again.",
+      "source": "trustpilot",
+      "rating": 1,
+      "date": "2026-04-05"
+    },
+    {
+      "text": "My dermatologist actually asked what I'd changed in my routine. That's when I knew this was working. Redness I've had for years is almost completely gone.",
+      "source": "amazon",
+      "rating": 5,
+      "date": "2026-04-03"
+    },
+    {
+      "text": "Product is fine. Does what it says eventually. My issue is the price \u2014 \u00a365 for a bottle that lasts 5 weeks is a lot to maintain. Would love a subscription discount.",
+      "source": "trustpilot",
+      "rating": 3,
+      "date": "2026-04-01"
+    },
+    {
+      "text": "I've tried everything \u2014 this is the first thing that actually worked. Not joking. Three months in, my skin is the best it's been since my twenties. Worth every penny.",
+      "source": "amazon",
+      "rating": 5,
+      "date": "2026-03-28"
+    },
+    {
+      "text": "Waited 3 weeks for delivery, no tracking updates, then it arrived damaged. The actual product smells lovely but I'm furious about the shipping experience.",
+      "source": "trustpilot",
+      "rating": 1,
+      "date": "2026-03-25"
+    },
+    {
+      "text": "Texture is lightweight, absorbs quickly without that greasy residue I hate. Skin feels plumper in the morning. Not a miracle but a solid daily serum.",
+      "source": "amazon",
+      "rating": 4,
+      "date": "2026-03-22"
+    },
+    {
+      "text": "Broke out in small bumps across my chin after a week of use. Never had reactions to skincare before. Stopped using it and skin cleared within days. Not for sensitive skin.",
+      "source": "trustpilot",
+      "rating": 2,
+      "date": "2026-03-19"
+    },
+    {
+      "text": "I've spent so much money on skincare over the years. This is the last serum I'll ever buy. Found my forever product. Economical too \u2014 a little goes a long way.",
+      "source": "amazon",
+      "rating": 5,
+      "date": "2026-03-16"
+    },
+    {
+      "text": "Instructions say apply to dry skin but the dropper makes it hard to control how much comes out. Wasted a fair bit early on. Once I got the technique down it was fine.",
+      "source": "trustpilot",
+      "rating": 3,
+      "date": "2026-03-14"
+    },
+    {
+      "text": "Bought this for my mum who has struggled with uneven skin tone for years. She called me after two weeks to ask what brand it was because she wanted to order more for her friend. Results speak for themselves.",
+      "source": "amazon",
+      "rating": 5,
+      "date": "2026-03-10"
+    },
+    {
+      "text": "The ads show models with flawless skin using the product. Real customers look nothing like that. I wanted to target specific dark spots \u2014 it did nothing for them specifically.",
+      "source": "trustpilot",
+      "rating": 1,
+      "date": "2026-03-07"
+    },
+    {
+      "text": "Simple routine-friendly formula. No strong scent, no heavy residue. My morning skincare went from 8 products to 4 after I added this. That alone is worth it for me.",
+      "source": "amazon",
+      "rating": 4,
+      "date": "2026-03-04"
+    },
+    {
+      "text": "Noticed my skin was more hydrated within the first few days. The long-term glow people talk about took about a month to really show but it did come. My GP commented on my complexion at a checkup \u2014 that was funny.",
+      "source": "trustpilot",
+      "rating": 5,
+      "date": "2026-03-01"
+    },
+    {
+      "text": "Good ingredients list, I'll give it that. But at this price point I expected faster, more visible results. It's doing something but slower than the brand implies. Managing expectations helps.",
+      "source": "amazon",
+      "rating": 2,
+      "date": "2026-02-26"
+    },
+    {
+      "text": "Strangers have started complimenting my skin. That has never happened in my 38 years of life. I don't know what else to say.",
+      "source": "trustpilot",
+      "rating": 5,
+      "date": "2026-02-22"
+    }
+  ]
+}

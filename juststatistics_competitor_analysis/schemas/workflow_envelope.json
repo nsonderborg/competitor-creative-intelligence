@@ -1,0 +1,356 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "workflow_envelope.json",
+  "title": "Competitor Intelligence Workflow Envelope",
+  "description": "Canonical data shape flowing through the n8n competitor intelligence pipeline. The root object is passed between all nodes and progressively populated.",
+
+  "definitions": {
+
+    "RunInput": {
+      "type": "object",
+      "required": ["run_id", "brand_name", "product_category"],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "description": "UUID v4 assigned at workflow start",
+          "example": "550e8400-e29b-41d4-a716-446655440000"
+        },
+        "brand_name": {
+          "type": "string",
+          "description": "The brand being researched",
+          "example": "GlowSkin"
+        },
+        "product_category": {
+          "type": "string",
+          "description": "Short product category for context",
+          "example": "skincare serums"
+        },
+        "positioning_intent": {
+          "type": "string",
+          "description": "Optional: how the client wants to position vs competitors",
+          "example": "premium natural alternative to clinical brands"
+        },
+        "competitor_urls": {
+          "type": "array",
+          "items": { "type": "string", "format": "uri" },
+          "description": "Meta Ads Library URLs or competitor site URLs",
+          "maxItems": 10
+        },
+        "ad_screenshots": {
+          "type": "array",
+          "description": "Ad creative images — base64-encoded or publicly accessible HTTPS URLs",
+          "items": {
+            "type": "object",
+            "required": ["source_type", "data"],
+            "properties": {
+              "source_type": { "type": "string", "enum": ["base64", "url"] },
+              "data": { "type": "string", "description": "base64 string or HTTPS URL" },
+              "media_type": {
+                "type": "string",
+                "enum": ["image/jpeg", "image/png", "image/webp", "image/gif"],
+                "default": "image/jpeg"
+              },
+              "competitor_name": { "type": "string" },
+              "ad_id": { "type": "string", "description": "Meta Ads Library ad ID if available" }
+            }
+          },
+          "maxItems": 20
+        },
+        "review_texts": {
+          "type": "array",
+          "description": "Raw review texts scraped from Trustpilot or Amazon",
+          "items": {
+            "type": "object",
+            "required": ["text", "source"],
+            "properties": {
+              "text": { "type": "string", "minLength": 10 },
+              "source": { "type": "string", "enum": ["trustpilot", "amazon", "google", "app_store"] },
+              "rating": { "type": "integer", "minimum": 1, "maximum": 5 },
+              "date": { "type": "string", "format": "date" }
+            }
+          },
+          "maxItems": 200
+        }
+      }
+    },
+
+    "VisionAnalysisResult": {
+      "type": "object",
+      "required": ["ad_index", "model_used", "input_tokens", "output_tokens", "analysis"],
+      "properties": {
+        "ad_index": { "type": "integer" },
+        "competitor_name": { "type": "string" },
+        "model_used": { "type": "string", "const": "claude-sonnet-4-6" },
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "cache_creation_input_tokens": { "type": "integer" },
+        "cache_read_input_tokens": { "type": "integer" },
+        "analysis": {
+          "type": "object",
+          "properties": {
+            "visual_structure": {
+              "type": "object",
+              "properties": {
+                "layout_type": { "type": "string" },
+                "dominant_colors": { "type": "array", "items": { "type": "string" } },
+                "image_composition": { "type": "string" },
+                "text_to_image_ratio": { "type": "string" },
+                "has_human_face": { "type": "boolean" },
+                "face_emotion": { "type": ["string", "null"] }
+              }
+            },
+            "copy_analysis": {
+              "type": "object",
+              "properties": {
+                "headline": { "type": ["string", "null"] },
+                "subheadline": { "type": ["string", "null"] },
+                "body_copy": { "type": ["string", "null"] },
+                "cta_text": { "type": ["string", "null"] },
+                "headline_formula": { "type": "string" },
+                "tone": { "type": "string" }
+              }
+            },
+            "offer_and_hook": {
+              "type": "object",
+              "properties": {
+                "primary_hook": { "type": "string" },
+                "value_proposition": { "type": "string" },
+                "offer_type": { "type": "string" },
+                "discount_value": { "type": ["string", "null"] },
+                "urgency_trigger": { "type": ["string", "null"] },
+                "scarcity_trigger": { "type": ["string", "null"] }
+              }
+            },
+            "audience_signals": {
+              "type": "object",
+              "properties": {
+                "inferred_target_demographic": { "type": "string" },
+                "pain_point_addressed": { "type": "string" },
+                "desire_addressed": { "type": "string" },
+                "awareness_stage": { "type": "string" }
+              }
+            },
+            "brand_signals": {
+              "type": "object",
+              "properties": {
+                "brand_name": { "type": ["string", "null"] },
+                "brand_tier_signal": { "type": "string" },
+                "trust_elements": { "type": "array", "items": { "type": "string" } },
+                "competitor_comparison": { "type": "boolean" }
+              }
+            },
+            "creative_quality": {
+              "type": "object",
+              "properties": {
+                "production_quality": { "type": "string" },
+                "authenticity_signal": { "type": "string" },
+                "estimated_ad_spend_tier": { "type": "string" }
+              }
+            }
+          }
+        },
+        "error": { "type": "string", "description": "Error message if analysis failed, else absent" }
+      }
+    },
+
+    "ReviewBatchResult": {
+      "type": "object",
+      "required": ["batch_index", "model_used", "input_tokens", "output_tokens", "result"],
+      "properties": {
+        "batch_index": { "type": "integer" },
+        "review_count": { "type": "integer" },
+        "model_used": { "type": "string", "const": "claude-haiku-4-5-20251001" },
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "cache_creation_input_tokens": { "type": "integer" },
+        "cache_read_input_tokens": { "type": "integer" },
+        "result": {
+          "type": "object",
+          "properties": {
+            "reviews": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "index": { "type": "integer" },
+                  "sentiment": {
+                    "type": "object",
+                    "properties": {
+                      "score": { "type": "integer", "minimum": 1, "maximum": 5 },
+                      "sentiment_label": { "type": "string" }
+                    }
+                  },
+                  "pain_point": {
+                    "type": "object",
+                    "properties": {
+                      "category": { "type": "string" },
+                      "pain_verbatim": { "type": ["string", "null"] }
+                    }
+                  },
+                  "desire": {
+                    "type": "object",
+                    "properties": {
+                      "category": { "type": "string" },
+                      "desire_verbatim": { "type": ["string", "null"] }
+                    }
+                  },
+                  "hook_potential": {
+                    "type": "object",
+                    "properties": {
+                      "usable_as_hook": { "type": "boolean" },
+                      "hook_candidate": { "type": ["string", "null"] },
+                      "hook_type": { "type": ["string", "null"] }
+                    }
+                  }
+                }
+              }
+            },
+            "aggregate": {
+              "type": "object",
+              "properties": {
+                "total_reviews": { "type": "integer" },
+                "average_sentiment_score": { "type": "number" },
+                "top_pain_points": { "type": "array" },
+                "top_desires": { "type": "array" },
+                "top_hook_candidates": { "type": "array", "items": { "type": "string" } },
+                "brand_summary_insight": { "type": "string" }
+              }
+            }
+          }
+        },
+        "error": { "type": "string" }
+      }
+    },
+
+    "AggregatedReviewIntelligence": {
+      "type": "object",
+      "description": "Merged aggregate across all review batches — produced by Review Aggregator Code node",
+      "properties": {
+        "total_reviews_processed": { "type": "integer" },
+        "overall_average_sentiment": { "type": "number" },
+        "top_pain_points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "category": { "type": "string" },
+              "count": { "type": "integer" },
+              "percentage": { "type": "number" },
+              "best_verbatim": { "type": "string" }
+            }
+          }
+        },
+        "top_desires": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "category": { "type": "string" },
+              "count": { "type": "integer" },
+              "percentage": { "type": "number" },
+              "best_verbatim": { "type": "string" }
+            }
+          }
+        },
+        "top_hook_candidates": {
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 10
+        },
+        "brand_summary_insight": { "type": "string" }
+      }
+    },
+
+    "HooksResult": {
+      "type": "object",
+      "required": ["hooks", "strategy_brief", "model_used"],
+      "properties": {
+        "model_used": { "type": "string", "const": "claude-sonnet-4-6" },
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "hooks": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 15,
+          "items": {
+            "type": "object",
+            "required": ["rank", "hook_text", "hook_formula", "psychological_trigger", "confidence_score"],
+            "properties": {
+              "rank": { "type": "integer" },
+              "hook_text": { "type": "string" },
+              "hook_formula": { "type": "string" },
+              "psychological_trigger": { "type": "string" },
+              "target_pain_point": { "type": "string" },
+              "target_desire": { "type": "string" },
+              "source_evidence": { "type": "string" },
+              "recommended_visual_pairing": { "type": "string" },
+              "confidence_score": { "type": "integer", "minimum": 1, "maximum": 10 }
+            }
+          }
+        },
+        "strategy_brief": {
+          "type": "object",
+          "properties": {
+            "dominant_themes": { "type": "array", "items": { "type": "string" } },
+            "competitor_gap": { "type": "string" },
+            "first_creative_recommendation": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "RunStats": {
+      "type": "object",
+      "properties": {
+        "ads_analysed": { "type": "integer" },
+        "reviews_processed": { "type": "integer" },
+        "hooks_generated": { "type": "integer" },
+        "total_input_tokens": { "type": "integer" },
+        "total_output_tokens": { "type": "integer" },
+        "estimated_cost_usd": { "type": "number" },
+        "sonnet_calls": { "type": "integer" },
+        "haiku_calls": { "type": "integer" }
+      }
+    },
+
+    "FinalOutput": {
+      "type": "object",
+      "required": ["run_id", "brand_name", "completed_at", "hooks", "brand_report", "run_stats"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "brand_name": { "type": "string" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "duration_seconds": { "type": "integer" },
+        "hooks": {
+          "type": "array",
+          "description": "Hooks from HooksResult sorted by confidence_score descending",
+          "items": { "$ref": "#/definitions/HooksResult/properties/hooks/items" }
+        },
+        "brand_report": {
+          "type": "string",
+          "description": "Full markdown report generated by Report Writer agent"
+        },
+        "run_stats": { "$ref": "#/definitions/RunStats" }
+      }
+    }
+
+  },
+
+  "type": "object",
+  "description": "Root envelope — top-level workflow state object passed through n8n nodes",
+  "properties": {
+    "input": { "$ref": "#/definitions/RunInput" },
+    "vision_analyses": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/VisionAnalysisResult" }
+    },
+    "review_batch_results": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/ReviewBatchResult" }
+    },
+    "review_intelligence": { "$ref": "#/definitions/AggregatedReviewIntelligence" },
+    "hooks_result": { "$ref": "#/definitions/HooksResult" },
+    "output": { "$ref": "#/definitions/FinalOutput" }
+  }
+}
