@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Competitor Creative Intelligence — Pipeline Architecture</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; padding: 48px 24px; }
+  .page { max-width: 1100px; margin: 0 auto; }
+
+  h1 { font-size: 22px; font-weight: 700; color: #f8fafc; letter-spacing: -0.3px; }
+  .subtitle { font-size: 14px; color: #64748b; margin-top: 6px; margin-bottom: 48px; }
+  .subtitle span { color: #94a3b8; }
+
+  /* Pipeline */
+  .pipeline { display: flex; flex-direction: column; gap: 0; }
+
+  .row { display: flex; align-items: center; justify-content: center; gap: 0; }
+  .row.parallel { align-items: stretch; }
+
+  /* Nodes */
+  .node {
+    border-radius: 10px;
+    padding: 14px 18px;
+    min-width: 160px;
+    text-align: center;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .node-name { font-size: 12px; font-weight: 600; color: #f1f5f9; line-height: 1.3; }
+  .node-model { font-size: 10px; margin-top: 5px; font-weight: 500; letter-spacing: 0.2px; }
+  .node-type { font-size: 10px; margin-top: 3px; color: #64748b; }
+
+  .node.webhook    { background: #1e293b; border: 1px solid #334155; }
+  .node.code       { background: #1a2234; border: 1px solid #2d3f5a; }
+  .node.haiku      { background: #0f2027; border: 1px solid #0e4d3a; }
+  .node.sonnet     { background: #1a0f2e; border: 1px solid #4a2070; }
+  .node.http       { background: #1a1a2e; border: 1px solid #2d2d5a; }
+  .node.merge      { background: #1e1a0f; border: 1px solid #4a3a10; }
+  .node.postgres   { background: #1a0f0f; border: 1px solid #4a1a1a; }
+  .node.respond    { background: #0f1a1a; border: 1px solid #1a4a4a; }
+
+  .model-haiku  { color: #34d399; }
+  .model-sonnet { color: #a78bfa; }
+  .model-code   { color: #60a5fa; }
+  .model-infra  { color: #f59e0b; }
+
+  /* Arrows */
+  .arrow { color: #334155; font-size: 18px; padding: 0 6px; flex-shrink: 0; display: flex; align-items: center; }
+  .arrow-down { color: #334155; font-size: 18px; text-align: center; line-height: 1; margin: 4px auto; }
+
+  /* Branch container */
+  .branch-container {
+    display: flex;
+    gap: 0;
+    align-items: stretch;
+    width: 100%;
+    justify-content: center;
+  }
+  .branch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1;
+    max-width: 520px;
+  }
+  .branch-label {
+    font-size: 10px;
+    color: #475569;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .branch-divider { width: 1px; background: #1e293b; margin: 0 12px; }
+  .branch-row { display: flex; align-items: center; gap: 0; }
+
+  /* Stats bar */
+  .stats { display: flex; gap: 24px; margin-top: 56px; padding-top: 32px; border-top: 1px solid #1e293b; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 140px; }
+  .stat-value { font-size: 28px; font-weight: 700; color: #f8fafc; letter-spacing: -1px; }
+  .stat-label { font-size: 12px; color: #64748b; margin-top: 4px; }
+
+  /* Legend */
+  .legend { display: flex; gap: 20px; margin-bottom: 32px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #94a3b8; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .dot-sonnet  { background: #7c3aed; border: 1px solid #a78bfa; }
+  .dot-haiku   { background: #065f46; border: 1px solid #34d399; }
+  .dot-code    { background: #1e3a5f; border: 1px solid #60a5fa; }
+  .dot-infra   { background: #78350f; border: 1px solid #f59e0b; }
+
+  .connector-v { width: 1px; height: 20px; background: #334155; margin: 0 auto; }
+  .connector-h { height: 1px; flex: 1; background: #1e293b; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>Competitor Creative Intelligence — Pipeline</h1>
+  <p class="subtitle">
+    Automated brand research workflow &nbsp;·&nbsp;
+    <span>n8n orchestration</span> &nbsp;·&nbsp;
+    <span>Claude API (Sonnet 4.6 + Haiku 4.5)</span> &nbsp;·&nbsp;
+    <span>~$0.15 / run</span>
+  </p>
+
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot dot-sonnet"></div>Claude Sonnet 4.6 — vision &amp; synthesis</div>
+    <div class="legend-item"><div class="legend-dot dot-haiku"></div>Claude Haiku 4.5 — classification</div>
+    <div class="legend-item"><div class="legend-dot dot-code"></div>Code / logic node</div>
+    <div class="legend-item"><div class="legend-dot dot-infra"></div>Infrastructure node</div>
+  </div>
+
+  <div class="pipeline">
+
+    <!-- Webhook -->
+    <div class="row">
+      <div class="node webhook">
+        <div class="node-name">Webhook Trigger</div>
+        <div class="node-type model-infra">POST /competitor-intelligence</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+
+    <!-- Input Validator -->
+    <div class="row">
+      <div class="node haiku">
+        <div class="node-name">Input Validator</div>
+        <div class="node-model model-haiku">Haiku 4.5</div>
+        <div class="node-type">schema check · fail fast</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+
+    <!-- Parallel branches -->
+    <div class="branch-container">
+
+      <!-- Vision branch -->
+      <div class="branch">
+        <div class="branch-label">Vision branch</div>
+        <div class="branch-row">
+          <div class="node sonnet">
+            <div class="node-name">Prepare Ad Items</div>
+            <div class="node-model model-sonnet">Sonnet 4.6</div>
+            <div class="node-type">builds API request · base64 image</div>
+          </div>
+        </div>
+        <div class="connector-v"></div>
+        <div class="branch-row">
+          <div class="node http">
+            <div class="node-name">Vision Analyst API</div>
+            <div class="node-model model-sonnet">Sonnet 4.6 · vision</div>
+            <div class="node-type">HTTP → api.anthropic.com</div>
+          </div>
+        </div>
+        <div class="connector-v"></div>
+        <div class="branch-row">
+          <div class="node code">
+            <div class="node-name">Parse Vision Response</div>
+            <div class="node-model model-code">Code node</div>
+            <div class="node-type">JSON parse · key normalise</div>
+          </div>
+        </div>
+        <div class="connector-v"></div>
+        <div class="branch-row">
+          <div class="node code">
+            <div class="node-name">Vision Results Merger</div>
+            <div class="node-model model-code">Code node</div>
+            <div class="node-type">aggregate N ad analyses</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="branch-divider"></div>
+
+      <!-- Review branch -->
+      <div class="branch">
+        <div class="branch-label">Review branch</div>
+        <div class="branch-row">
+          <div class="node haiku">
+            <div class="node-name">Prepare Review Batches</div>
+            <div class="node-model model-haiku">Haiku 4.5</div>
+            <div class="node-type">batch 20 reviews · build request</div>
+          </div>
+        </div>
+        <div class="connector-v"></div>
+        <div class="branch-row">
+          <div class="node http">
+            <div class="node-name">Review Miner API</div>
+            <div class="node-model model-haiku">Haiku 4.5 · classify</div>
+            <div class="node-type">HTTP → api.anthropic.com</div>
+          </div>
+        </div>
+        <div class="connector-v"></div>
+        <div class="branch-row">
+          <div class="node code">
+            <div class="node-name">Parse Review Response</div>
+            <div class="node-model model-code">Code node</div>
+            <div class="node-type">JSON parse · token capture</div>
+          </div>
+        </div>
+        <div class="connector-v"></div>
+        <div class="branch-row">
+          <div class="node code">
+            <div class="node-name">Review Aggregator</div>
+            <div class="node-model model-code">Code node</div>
+            <div class="node-type">merge batches · rank pain points</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="connector-v"></div>
+
+    <!-- Merge -->
+    <div class="row">
+      <div class="node merge">
+        <div class="node-name">Merge Branches</div>
+        <div class="node-type model-infra">waits for both branches</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+
+    <!-- Hook Strategist -->
+    <div class="row">
+      <div class="node sonnet">
+        <div class="node-name">Prepare Hook Request</div>
+        <div class="node-model model-sonnet">Sonnet 4.6</div>
+        <div class="node-type">synthesise vision + reviews → 12 hooks</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+    <div class="row">
+      <div class="node http">
+        <div class="node-name">Hook Strategist API</div>
+        <div class="node-model model-sonnet">Sonnet 4.6 · synthesis</div>
+        <div class="node-type">HTTP → api.anthropic.com</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+    <div class="row">
+      <div class="node code">
+        <div class="node-name">Parse Hook Response</div>
+        <div class="node-model model-code">Code node</div>
+        <div class="node-type">extract hooks · confidence sort</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+
+    <!-- Report Writer -->
+    <div class="row">
+      <div class="node sonnet">
+        <div class="node-name">Prepare Report Request</div>
+        <div class="node-model model-sonnet">Sonnet 4.6</div>
+        <div class="node-type">full brand research brief</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+    <div class="row">
+      <div class="node http">
+        <div class="node-name">Report Writer API</div>
+        <div class="node-model model-sonnet">Sonnet 4.6 · long-form</div>
+        <div class="node-type">HTTP → api.anthropic.com</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+    <div class="row">
+      <div class="node code">
+        <div class="node-name">Parse Report Response</div>
+        <div class="node-model model-code">Code node</div>
+        <div class="node-type">extract markdown report</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+
+    <!-- Output + DB -->
+    <div class="row">
+      <div class="node code">
+        <div class="node-name">Output Formatter</div>
+        <div class="node-model model-code">Code node</div>
+        <div class="node-type">assemble envelope · cost calc</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+    <div class="row">
+      <div class="node postgres">
+        <div class="node-name">Save Run History</div>
+        <div class="node-type model-infra">PostgreSQL · run_history table</div>
+      </div>
+    </div>
+    <div class="connector-v"></div>
+    <div class="row">
+      <div class="node respond">
+        <div class="node-name">Respond to Webhook</div>
+        <div class="node-type model-infra">JSON envelope → caller</div>
+      </div>
+    </div>
+
+  </div><!-- /pipeline -->
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-value">20</div>
+      <div class="stat-label">nodes in workflow</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">~$0.15</div>
+      <div class="stat-label">cost per run</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">12</div>
+      <div class="stat-label">ranked hooks per brand</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">&lt;15 min</div>
+      <div class="stat-label">vs. 4h manual process</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">4</div>
+      <div class="stat-label">Claude API agents</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
