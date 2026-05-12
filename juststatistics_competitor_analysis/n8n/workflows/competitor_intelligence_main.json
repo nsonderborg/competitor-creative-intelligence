@@ -383,15 +383,15 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        2640,
-        208
+        3700,
+        300
       ],
       "disabled": true
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ $('Output Formatter').first().json }}",
+        "responseBody": "={{ $('Attach Doc URL').first().json }}",
         "options": {}
       },
       "id": "3539c0f0-7417-4e15-ba5b-44e9b2f32639",
@@ -399,9 +399,56 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        2864,
-        208
+        3920,
+        300
       ]
+    },
+    {
+      "id": "node-21-create-doc",
+      "name": "Create Brand Report Doc",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        3260,
+        300
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_CREDENTIAL_ID",
+          "name": "Google Drive"
+        }
+      },
+      "parameters": {
+        "resource": "file",
+        "operation": "createFromText",
+        "name": "={{ 'Brand Research Report: ' + $json.brand_name + ' \u2014 ' + $json.completed_at.slice(0,10) }}",
+        "content": "={{ $json.brand_report }}",
+        "driveId": {
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "mode": "list",
+          "value": "root"
+        },
+        "additionalFields": {
+          "convertToGoogleDocument": true
+        }
+      }
+    },
+    {
+      "id": "node-22-attach-doc-url",
+      "name": "Attach Doc URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3480,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const output = $('Output Formatter').first().json;\nconst file = $input.first().json;\nconst docId = file.id;\nconst docUrl = 'https://docs.google.com/document/d/' + docId + '/edit';\nreturn [{ json: { ...output, google_doc_url: docUrl } }];"
+      }
     }
   ],
   "connections": {
@@ -601,7 +648,7 @@
       "main": [
         [
           {
-            "node": "Save Run History",
+            "node": "Create Brand Report Doc",
             "type": "main",
             "index": 0
           }
@@ -613,6 +660,28 @@
         [
           {
             "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Brand Report Doc": {
+      "main": [
+        [
+          {
+            "node": "Attach Doc URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Doc URL": {
+      "main": [
+        [
+          {
+            "node": "Save Run History",
             "type": "main",
             "index": 0
           }
