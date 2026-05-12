@@ -35,30 +35,30 @@ case "${IMAGE_PATH##*.}" in
     *)        MEDIA_TYPE="image/jpeg" ;;
 esac
 
-# Encode to base64 (cross-platform: works on macOS and Linux)
-if command -v base64 &>/dev/null; then
-    B64=$(base64 -i "$IMAGE_PATH" | tr -d '\n')
-else
-    echo "Error: base64 command not found"
-    exit 1
-fi
+# Inject into payload using Python — reads image file directly to avoid arg length limits
+python3 - <<PYEOF
+import json, base64
 
-# Inject into payload using Python (avoids sed issues with long base64 strings)
-python3 -c "
-import json, sys
+image_path = '${IMAGE_PATH}'
+media_type = '${MEDIA_TYPE}'
+payload_file = '${PAYLOAD_FILE}'
 
-with open('${PAYLOAD_FILE}', 'r') as f:
+with open(image_path, 'rb') as f:
+    b64 = base64.b64encode(f.read()).decode()
+
+with open(payload_file, 'r') as f:
     payload = json.load(f)
 
-payload['ad_screenshots'][0]['data'] = '${B64}'
-payload['ad_screenshots'][0]['media_type'] = '${MEDIA_TYPE}'
+payload['ad_screenshots'][0]['data'] = b64
+payload['ad_screenshots'][0]['media_type'] = media_type
+payload['ad_screenshots'][0]['source_type'] = 'base64'
 
-with open('${PAYLOAD_FILE}', 'w') as f:
+with open(payload_file, 'w') as f:
     json.dump(payload, f, indent=2)
 
-print('Injected: ${IMAGE_PATH}')
-print('Media type: ${MEDIA_TYPE}')
-print('Base64 length: ' + str(len('${B64}')) + ' chars')
-"
+print(f'Injected: {image_path}')
+print(f'Media type: {media_type}')
+print(f'Base64 length: {len(b64)} chars')
+PYEOF
 
 echo "Done. Run tests/send_test.sh to fire the payload at n8n."
