@@ -13,8 +13,12 @@ data/reports/*
 
 # Config (contains personal profile)
 config/profile.json
+config/portfolio.json
 config/categories.json
 config/reconciled.json
+
+# Environment variables (API keys)
+.env
 
 # Keep directory structure
 !data/inbox/.gitkeep

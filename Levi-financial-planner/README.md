@@ -35,6 +35,7 @@ Bank exports (CSV / .numbers / PDF)
 | Saxo Bank account statement | `.numbers` | Drop into `data/inbox/` |
 | User profile | Form in Tab 5 | Age, income, goals, savings target |
 | Balance sheet | Form in Tab 5 | Assets, liabilities, insurance, pension |
+| Dagpenge (safety net) | Form in Tab 5 | Unemployment benefits gross/net, max weeks |
 | Budget targets | Form in Tab 5 | Per-category monthly limits in DKK |
 | Category rules | Inline editor in Tab 2 | Keyword rules + per-row overrides |
 
@@ -75,7 +76,7 @@ Three functions compose the AI prompt context:
 | Function | Content | Privacy |
 |---|---|---|
 | `build_context()` | KPIs, category totals, TOP 10 merchants, budget status | Full DKK — local only |
-| `build_balance_sheet_context()` | Assets, liabilities, insurance, pension | Full DKK — local only |
+| `build_balance_sheet_context()` | Assets, liabilities, insurance, pension, dagpenge | Full DKK — local only |
 | `build_portfolio_context()` | Holdings as % and EUR prices only | Safe for Claude API |
 
 Merchant-level detail (`TOP 10 UDGIFTER` section) is stripped before any Claude API call via `_strip_merchant_names()`.
@@ -229,7 +230,7 @@ Levi-financial-planner/
 ├── requirements.txt
 ├── pytest.ini
 ├── config/                     # Gitignored, created at runtime
-│   ├── profile.json            # User profile, budgets, balance sheet
+│   ├── profile.json            # User profile, budgets, balance sheet, dagpenge
 │   ├── categories.json         # {rules: {…}, overrides: {…}}
 │   └── portfolio.json          # Saxo snapshot (written by parse_saxo_pdf)
 ├── data/

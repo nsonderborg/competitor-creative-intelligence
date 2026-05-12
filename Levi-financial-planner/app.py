@@ -15,6 +15,7 @@ from nordea_parser import (
     parse_any, load_all_processed, build_context, build_balance_sheet_context,
     load_categories, save_categories, recategorize,
     load_reconciled, save_reconciled,
+    parse_saxo_pdf, fetch_gold_price_dkk, fetch_gold_history_dkk,
 )
 
 st.set_page_config(page_title="Finansiel Cockpit", page_icon="📊", layout="wide")
@@ -126,6 +127,16 @@ def get_models():
     return []
 
 
+@st.cache_data(ttl=3600)
+def _cached_gold(n: int) -> float | None:
+    """Fetch and cache live Centenario gold value for 1 hour."""
+    return fetch_gold_price_dkk(n)
+
+@st.cache_data(ttl=3600)
+def _cached_gold_history(n: int, period: str = "6mo") -> "pd.Series | None":
+    return fetch_gold_history_dkk(n, period)
+
+
 # ── Session init ──────────────────────────────────────────────────────────────
 for k, v in [("messages", []), ("persona", "analyst"), ("ai_mode", "local"), ("df", None), ("context", ""), ("cat_data", None)]:
     if k not in st.session_state:
@@ -163,27 +174,49 @@ with st.sidebar:
     st.divider()
     st.subheader("📂 Upload fil")
     uploaded = st.file_uploader(
-        "Nordea kontoudtog",
-        type=["csv", "txt", "numbers"],
-        help="Understøtter Apple Numbers (.numbers) og CSV-eksport fra Nordea Netbank"
+        "Bank- eller investeringsudtog",
+        type=["csv", "txt", "numbers", "pdf"],
+        help="Nordea CSV/Numbers eller Saxo Bank PDF porteføljerapport"
     )
     if uploaded:
-        df_new = parse_any(uploaded, uploaded.name)
-        if df_new is not None:
-            PROCESSED.mkdir(parents=True, exist_ok=True)
-            dest = PROCESSED / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded.name}"
-            uploaded.seek(0)
-            dest.write_bytes(uploaded.read())
-            n_res = df_new["reserveret"].sum() if "reserveret" in df_new.columns else 0
-            st.success(f"✓ {len(df_new) - n_res} bogførte + {n_res} reserverede posteringer")
+        fname = uploaded.name.lower()
+        if fname.endswith(".pdf"):
+            # Saxo Bank PDF portfolio report
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded.read())
+                tmp_path = tmp.name
+            try:
+                portfolio = parse_saxo_pdf(tmp_path, CONFIG_DIR)
+                st.success(f"✓ Saxo-portefølje indlæst: {portfolio.get('account', 'Ukendt konto')}")
+                st.json({
+                    "Konto": portfolio.get("account"),
+                    "Periode": f"{portfolio.get('period', {}).get('start')} → {portfolio.get('period', {}).get('end')}",
+                    "YTD afkast": f"{portfolio.get('total_return_pct')}%",
+                    "Beholdninger": len(portfolio.get("holdings", [])),
+                })
+            except Exception as e:
+                st.error(f"Kunne ikke parse Saxo PDF: {e}")
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
         else:
-            st.error("Kunne ikke parse filen — tjek Nordea-formatet")
+            df_new = parse_any(uploaded, uploaded.name)
+            if df_new is not None:
+                PROCESSED.mkdir(parents=True, exist_ok=True)
+                dest = PROCESSED / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded.name}"
+                uploaded.seek(0)
+                dest.write_bytes(uploaded.read())
+                n_res = df_new["reserveret"].sum() if "reserveret" in df_new.columns else 0
+                st.success(f"✓ {len(df_new) - n_res} bogførte + {n_res} reserverede posteringer")
+            else:
+                st.error("Kunne ikke parse filen — tjek formatet")
 
     st.caption("eller læg filer i:")
     st.code(str(INBOX), language=None)
 
     if st.button("🔄 Scan inbox-mappe", use_container_width=True):
         moved = 0
+        # Process CSV and Numbers files (Nordea)
         for pattern in ["*.csv", "*.numbers"]:
             for f in INBOX.glob(pattern):
                 df_new = parse_any(f, f.name)
@@ -191,6 +224,15 @@ with st.sidebar:
                     shutil.move(str(f), str(PROCESSED / f.name))
                     st.success(f"✓ {f.name}")
                     moved += 1
+        # Process PDF files (Saxo Bank)
+        for f in INBOX.glob("*.pdf"):
+            try:
+                portfolio = parse_saxo_pdf(f, CONFIG_DIR)
+                shutil.move(str(f), str(PROCESSED / f.name))
+                st.success(f"✓ {f.name} → Saxo-portefølje indlæst")
+                moved += 1
+            except Exception as e:
+                st.warning(f"⚠️ {f.name} ikke Saxo-format: {e}")
         if moved == 0:
             st.info("Ingen nye filer i inbox")
 
@@ -202,17 +244,51 @@ with st.sidebar:
         _profile = load_profile() or {}
         st.session_state.df       = all_df
         st.session_state.cat_data = cat_data
+        _gold_n = int((_profile.get("gold", {}) or {}).get("centenario_count", 0))
+        _gold_v = _cached_gold(_gold_n) if _gold_n > 0 else None
         st.session_state.context  = (
             build_context(all_df, _profile or None, budgets=_profile.get("budgets") or None)
-            + build_balance_sheet_context(_profile)
+            + build_balance_sheet_context(_profile, gold_value_dkk=_gold_v)
         )
         real    = all_df[~all_df["reserveret"]] if "reserveret" in all_df.columns else all_df
-        income  = real[real["beløb"] > 0]["beløb"].sum()
-        expense = real[real["beløb"] < 0]["beløb"].sum()
+        _no_xfr = real["kategori"] != "Overførsler"
+        income  = real[_no_xfr & (real["beløb"] > 0)]["beløb"].sum()
+        expense = real[_no_xfr & (real["beløb"] < 0)]["beløb"].sum()
         st.divider()
         st.metric("Indkomst", f"{income:,.0f} DKK")
         st.metric("Udgifter", f"{abs(expense):,.0f} DKK")
         st.metric("Netto",    f"{income+expense:+,.0f} DKK")
+
+    # ── Portfolio display (if Saxo PDF loaded) ─────────────────────────────────
+    portfolio = load_portfolio()
+    if portfolio:
+        st.divider()
+        st.subheader("📈 Portefølje")
+        st.caption(f"{portfolio.get('account', 'Konto')} · {portfolio.get('as_of', '-')}")
+        ytd = portfolio.get("total_return_pct")
+        if ytd is not None:
+            color = "green" if ytd >= 0 else "red"
+            st.metric("YTD Afkast", f"{ytd:+.2f}%")
+        holdings = portfolio.get("holdings", [])
+        if holdings:
+            with st.expander(f"Beholdninger ({len(holdings)})", expanded=False):
+                for h in holdings:
+                    name = h.get("name", h.get("isin", "?"))
+                    weight = h.get("weight_pct", 0)
+                    ret = h.get("return_pct")
+                    ret_str = f"{ret:+.1f}%" if ret is not None else "-"
+                    st.text(f"{name}: {weight:.1f}% · {ret_str}")
+
+    # ── Gold Centenario tracker ─────────────────────────────────────────────────
+    _prof_sidebar = load_profile()
+    gold_count_sidebar = int((_prof_sidebar.get("gold", {}) or {}).get("centenario_count", 0))
+    if gold_count_sidebar > 0:
+        st.divider()
+        gold_val_sidebar = _cached_gold(gold_count_sidebar)
+        if gold_val_sidebar:
+            st.metric("🪙 Centenario guld", f"{gold_val_sidebar:,.0f} DKK")
+        else:
+            st.metric("🪙 Centenario guld", "Kurs utilgængelig")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
@@ -231,60 +307,185 @@ with tab1:
             view = df[df["_source_file"] == kilde1] if kilde1 != "Alle" else df
         else:
             view = df
-        real    = view[~view["reserveret"]] if "reserveret" in view.columns else view
+
+        # ── Period filter ─────────────────────────────────────────────────────
+        all_dates = view.dropna(subset=["dato"])["dato"]
+        if not all_dates.empty:
+            min_d = all_dates.min().date()
+            max_d = all_dates.max().date()
+            period_sel = st.date_input(
+                "Periode",
+                value=(min_d, max_d),
+                min_value=min_d, max_value=max_d,
+                key="tab1_period",
+            )
+            if isinstance(period_sel, (list, tuple)) and len(period_sel) == 2:
+                d_from, d_to = period_sel
+            else:
+                d_from = d_to = period_sel[0] if period_sel else min_d
+        else:
+            from datetime import date as _date
+            d_from = d_to = _date.today()
+
+        real     = view[~view["reserveret"]] if "reserveret" in view.columns else view
         reserved = view[view["reserveret"]]  if "reserveret" in view.columns else pd.DataFrame()
-        income  = real[real["beløb"] > 0]["beløb"].sum()
-        expense = real[real["beløb"] < 0]["beløb"].sum()
-        net     = income + expense
-        months  = real["dato"].dropna().dt.to_period("M").nunique()
-        savings_rate = net / income * 100 if income > 0 else 0
+
+        # Apply period filter
+        real = real[real["dato"].between(pd.Timestamp(d_from), pd.Timestamp(d_to))]
+
+        # ── Split private / shared ─────────────────────────────────────────────
+        _no_xfr    = real["kategori"] != "Overførsler"
+        _has_fælles = "_revolut_account" in real.columns and real["_revolut_account"].notna().any()
+        if _has_fælles:
+            _is_shared  = real["_revolut_account"].str.contains("Fælles", na=False, case=False)
+            priv_real   = real[~_is_shared & _no_xfr]
+            shared_real = real[_is_shared & _no_xfr]
+        else:
+            priv_real   = real[_no_xfr]
+            shared_real = pd.DataFrame()
+
+        months = max(real["dato"].dropna().dt.to_period("M").nunique(), 1)
 
         if len(reserved) > 0:
             items = " · ".join(reserved["label"].dropna().tolist())
             st.info(f"⏳ **Reserverede (ikke bogført):** {items}")
 
-        st.subheader("5 tal der fortæller om du er på rette spor")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Gns. opsparing/md",  f"{net/max(months,1):,.0f} DKK")
-        c2.metric("Opsparingsrate",      f"{savings_rate:.1f}%",     help="Mål: >20%")
-        c3.metric("Udgiftsratio",        f"{abs(expense/income*100):.1f}%", help="Mål: <80%")
-        subs_md = abs(real[real["kategori"] == "Abonnementer"]["beløb"].sum() / max(months, 1))
-        c4.metric("Abonnementer/md",     f"{subs_md:,.0f} DKK")
-        c5.metric("Dataperiode",         f"{months} mdr.")
+        # ── KPI row ────────────────────────────────────────────────────────────
+        if not shared_real.empty:
+            kpi_left, kpi_right = st.columns(2)
+        else:
+            kpi_left  = st.container()
+            kpi_right = None
+
+        with kpi_left:
+            if not shared_real.empty:
+                st.markdown("##### 🔒 Privat")
+            else:
+                st.subheader("5 tal der fortæller om du er på rette spor")
+            p_income  = priv_real[priv_real["beløb"] > 0]["beløb"].sum()
+            p_expense = priv_real[priv_real["beløb"] < 0]["beløb"].sum()
+            p_net     = p_income + p_expense
+            p_savings = p_net / p_income * 100 if p_income > 0 else 0
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Gns. opsparing/md", f"{p_net/months:,.0f} DKK")
+            c2.metric("Opsparingsrate",    f"{p_savings:.1f}%", help="Mål: >20%")
+            c3.metric("Udgiftsratio",      f"{abs(p_expense/p_income*100):.1f}%" if p_income else "–", help="Mål: <80%")
+            subs_md = abs(priv_real[priv_real["kategori"] == "Abonnementer"]["beløb"].sum() / months)
+            c4.metric("Abonnementer/md",   f"{subs_md:,.0f} DKK")
+            c5.metric("Dataperiode",       f"{months} mdr.")
+
+        if kpi_right is not None:
+            with kpi_right:
+                st.markdown("##### 👫 Fælles")
+                sh_expense = shared_real[shared_real["beløb"] < 0]["beløb"].sum()
+                sh_months  = max(shared_real["dato"].dropna().dt.to_period("M").nunique(), 1)
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("Udgifter total", f"{abs(sh_expense):,.0f} DKK")
+                sc2.metric("Gns./md",        f"{abs(sh_expense)/sh_months:,.0f} DKK")
+                dag_md = abs(shared_real[shared_real["kategori"] == "Dagligvarer"]["beløb"].sum() / sh_months)
+                sc3.metric("Dagligvarer/md", f"{dag_md:,.0f} DKK")
+
+        # ── Charts (toggle selects which account view) ─────────────────────────
+        if _has_fælles:
+            chart_konto = st.radio("Vis", ["Alle", "Privat", "Fælles"], horizontal=True, key="tab1_chart_konto")
+            if chart_konto == "Privat":
+                chart_real = priv_real
+            elif chart_konto == "Fælles":
+                chart_real = shared_real
+            else:
+                chart_real = real[_no_xfr]
+        else:
+            chart_real = priv_real
 
         col1, col2 = st.columns(2)
         with col1:
+            chart_view = st.radio("Udgiftsvisning", ["Samlet periode", "Per måned"], horizontal=True, key="tab1_chart_view")
             st.subheader("Udgifter pr. kategori")
-            cat_data = real[real["beløb"] < 0].groupby("kategori")["beløb"].sum().abs().sort_values(ascending=False)
-            st.bar_chart(cat_data)
+            exp_df = chart_real[chart_real["beløb"] < 0].copy()
+            if chart_view == "Per måned" and not exp_df.empty:
+                exp_df["måned"] = exp_df["dato"].dt.to_period("M").astype(str)
+                pivot = exp_df.groupby(["måned", "kategori"])["beløb"].sum().abs().unstack(fill_value=0)
+                st.bar_chart(pivot)
+            elif not exp_df.empty:
+                cat_totals = exp_df.groupby("kategori")["beløb"].sum().abs().sort_values(ascending=False)
+                st.bar_chart(cat_totals)
         with col2:
             st.subheader("Månedlig pengestrøm")
-            monthly = real.dropna(subset=["dato"]).groupby(
-                real.dropna(subset=["dato"])["dato"].dt.to_period("M").astype(str)
-            )["beløb"].sum()
-            st.bar_chart(monthly)
+            _cf = chart_real.dropna(subset=["dato"])
+            monthly_cf = _cf.groupby(_cf["dato"].dt.to_period("M").astype(str))["beløb"].sum()
+            st.bar_chart(monthly_cf)
 
-        # ── Budget progress ───────────────────────────────────────────────────
-        budgets = load_profile().get("budgets", {})
-        active  = {c: v for c, v in budgets.items() if v > 0}
-        if active:
-            st.subheader("Budgetstatus denne måned")
-            now = pd.Timestamp.now()
-            this_month = real[
-                real["dato"].dt.year.eq(now.year) & real["dato"].dt.month.eq(now.month)
-            ]
-            by_cat = this_month[this_month["beløb"] < 0].groupby("kategori")["beløb"].sum().abs()
-            for cat, limit in sorted(active.items()):
+        # ── Income breakdown (always private — income is never shared) ────────
+        INCOME_CATS = ["Løn & Indkomst", "Renteindtægt", "Erhvervsindkomst"]
+        income_df = priv_real[priv_real["beløb"] > 0].copy()
+        if not income_df.empty:
+            st.subheader("Indkomst pr. kilde")
+            inc_pivot = income_df.groupby(
+                [income_df["dato"].dt.to_period("M").astype(str), "kategori"]
+            )["beløb"].sum().unstack(fill_value=0)
+            for cat in INCOME_CATS:
+                if cat not in inc_pivot.columns:
+                    inc_pivot[cat] = 0
+            other_cols = [c for c in inc_pivot.columns if c not in INCOME_CATS]
+            if other_cols:
+                inc_pivot["Andre"] = inc_pivot[other_cols].sum(axis=1)
+                show_cols = INCOME_CATS + ["Andre"]
+            else:
+                show_cols = INCOME_CATS
+            inc_pivot = inc_pivot[[c for c in show_cols if c in inc_pivot.columns]]
+            st.bar_chart(inc_pivot)
+            if "Erhvervsindkomst" not in income_df["kategori"].values:
+                st.caption("💼 Ingen erhvervsindkomst endnu — tilføj nøgleord under 🏷️ Kategorier")
+
+        # ── Budget progress ────────────────────────────────────────────────────
+        SHARED_BUDGET_CATS = {"Dagligvarer", "Børn & Familie", "Indretning"}
+        _prof_bud   = load_profile()
+        _old_bud    = _prof_bud.get("budgets", {})  # backwards compat
+        budgets_priv   = _prof_bud.get("budgets_private", _old_bud)
+        budgets_shared = _prof_bud.get("budgets_shared", {})
+        period_label   = f"{d_from.strftime('%d/%m/%y')} — {d_to.strftime('%d/%m/%y')}"
+
+        def _active(bdict):
+            out = {}
+            for c, v in bdict.items():
+                if isinstance(v, int) and v > 0:
+                    out[c] = {"limit": v, "frequency": "monthly"}
+                elif isinstance(v, dict) and v.get("limit", 0) > 0:
+                    out[c] = v
+            return out
+
+        def _render_budgets(active, spending_df):
+            by_cat = spending_df[spending_df["beløb"] < 0].groupby("kategori")["beløb"].sum().abs()
+            for cat, info in sorted(active.items()):
+                limit = info["limit"]
                 spent = float(by_cat.get(cat, 0))
                 pct   = spent / limit
-                label = f"{cat}: {spent:,.0f} / {limit:,.0f} DKK ({pct*100:.0f}%)"
+                lbl   = f"{cat}: {spent:,.0f} / {limit:,.0f} DKK ({pct*100:.0f}%) — {period_label}"
                 if pct > 1.0:
-                    st.error(f"Over budget! {label}")
+                    st.error(f"Over budget! {lbl}")
                 elif pct > 0.8:
-                    st.warning(label)
+                    st.warning(lbl)
                 else:
-                    st.success(label)
+                    st.success(lbl)
                 st.progress(min(pct, 1.0))
+
+        active_priv   = _active(budgets_priv)
+        active_shared = _active(budgets_shared)
+
+        if active_priv or active_shared:
+            st.subheader("Budgetstatus")
+            if not shared_real.empty:
+                bc1, bc2 = st.columns(2)
+                with bc1:
+                    if active_priv:
+                        st.markdown("**🔒 Privat**")
+                        _render_budgets(active_priv, priv_real)
+                with bc2:
+                    if active_shared:
+                        st.markdown("**👫 Fælles**")
+                        _render_budgets(active_shared, shared_real)
+            else:
+                _render_budgets({**active_priv, **active_shared}, priv_real)
         else:
             st.caption("💡 Sæt budgetmål under ⚙️ Profil & Rapporter for at se budgetstatus her.")
 
@@ -326,7 +527,9 @@ with tab2:
 
         def _row_key(r):
             dato_str = r["dato"].strftime("%Y-%m-%d") if pd.notna(r["dato"]) else "NaT"
-            return f"{dato_str}||{r['beløb']}||{r['label']}"
+            beløb_str = f"{float(r['beløb'])}" if pd.notna(r['beløb']) else ""
+            label_str = str(r['label']) if r['label'] is not None else ""
+            return f"{dato_str}||{beløb_str}||{label_str}"
 
         keys = filt.apply(_row_key, axis=1)
 
@@ -376,6 +579,16 @@ with tab2:
         if any_changed:
             save_reconciled(CONFIG_DIR, new_rec)
 
+        # ── Selection totals ──────────────────────────────────────────────────
+        sel_income  = filt[filt["beløb"] > 0]["beløb"].sum()
+        sel_expense = filt[filt["beløb"] < 0]["beløb"].sum()
+        sel_net     = sel_income + sel_expense
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("Indkomst (udvalg)",  f"{sel_income:+,.0f} DKK")
+        sc2.metric("Udgifter (udvalg)",  f"{sel_expense:+,.0f} DKK")
+        sc3.metric("Netto (udvalg)",     f"{sel_net:+,.0f} DKK")
+        sc4.metric("Antal rækker",       len(filt))
+
         # ── Category editor ───────────────────────────────────────────────────
         cat_data = st.session_state.cat_data or load_categories(CONFIG_DIR)
         rules    = cat_data["rules"]
@@ -402,7 +615,10 @@ with tab2:
                     if st.button("💾 Gem reklassificering"):
                         row = non_res.iloc[tx_idx]
                         dato = row["dato"].strftime("%Y-%m-%d") if pd.notna(row["dato"]) else "NaT"
-                        key  = f"{dato}||{row['beløb']}||{row['label']}"
+                        # Use consistent float formatting to match _override_key in nordea_parser.py
+                        beløb_str = f"{float(row['beløb'])}" if pd.notna(row['beløb']) else ""
+                        label_str = str(row['label']) if row['label'] is not None else ""
+                        key  = f"{dato}||{beløb_str}||{label_str}"
                         overrides[key] = new_cat
                         save_categories(CONFIG_DIR, {"rules": rules, "overrides": overrides})
                         st.success(f"Gemt: '{row['label']}' → {new_cat}")
@@ -513,7 +729,8 @@ with tab4:
             st.subheader("🗺️ BlackRock Livs-Finansielt Roadmap")
             st.caption("Kører 100% lokalt via Ollama")
             if st.button("🏦 Generer mit BlackRock Livs-Roadmap", type="primary"):
-                ctx = (build_context(df, profile) if df is not None else "") + build_balance_sheet_context(profile)
+                _gn = int((profile.get("gold", {}) or {}).get("centenario_count", 0))
+                ctx = (build_context(df, profile) if df is not None else "") + build_balance_sheet_context(profile, gold_value_dkk=_cached_gold(_gn) if _gn > 0 else None)
                 roadmap_prompt = f"""Lav et komplet livslang finansielt roadmap.
 
 {ctx}
@@ -601,9 +818,10 @@ Brug konkrete DKK-tal. Inkluder folkepension (~14.000 DKK/md fra 67), ATP og arb
 
             confirmed = st.checkbox("Jeg accepterer at sende anonymiserede finansdata til Claude API")
             if st.button(f"🔬 Generer {cfg['title']}", type="primary", disabled=not confirmed):
+                _gn = int((profile.get("gold", {}) or {}).get("centenario_count", 0))
                 ctx = (
                     (build_context(df, profile) if df is not None else "")
-                    + build_balance_sheet_context(profile)
+                    + build_balance_sheet_context(profile, gold_value_dkk=_cached_gold(_gn) if _gn > 0 else None)
                 )
                 if cfg["portfolio"]:
                     from nordea_parser import build_portfolio_context
@@ -640,18 +858,51 @@ with tab5:
         freedom   = st.text_input("Hvad er finansiel frihed for dig?", profile.get("freedom", ""))
 
         st.divider()
-        st.markdown("**Budgetmål pr. kategori (DKK/md)**")
-        NON_EXPENSE = {"Andet", "Løn & Indkomst", "Overførsler"}
-        budget_cats = load_categories(CONFIG_DIR)
+        st.markdown("**Budgetmål pr. kategori**")
+        NON_EXPENSE = {"Andet", "Løn & Indkomst", "Overførsler", "Renteindtægt", "Erhvervsindkomst"}
+        SHARED_BUDGET_CATS = {"Dagligvarer", "Børn & Familie", "Indretning"}
+        QUARTERLY_DEFAULT  = {"A-kasse"}
+        budget_cats  = load_categories(CONFIG_DIR)
         expense_cats = [c for c in budget_cats["rules"] if c not in NON_EXPENSE]
-        saved_budgets = profile.get("budgets", {})
-        new_budgets = {}
-        b_cols = st.columns(2)
-        for i, cat in enumerate(expense_cats):
-            new_budgets[cat] = b_cols[i % 2].number_input(
-                cat, min_value=0, max_value=100_000,
-                value=int(saved_budgets.get(cat, 0)), step=100, key=f"budget_{cat}"
-            )
+        priv_cats    = [c for c in expense_cats if c not in SHARED_BUDGET_CATS]
+        shared_cats  = [c for c in expense_cats if c in SHARED_BUDGET_CATS]
+
+        _old_bud_tab5  = profile.get("budgets", {})  # backwards compat
+        saved_priv_tab5   = profile.get("budgets_private", _old_bud_tab5)
+        saved_shared_tab5 = profile.get("budgets_shared", {})
+        new_budgets_priv   = {}
+        new_budgets_shared = {}
+
+        b_col1, b_col2 = st.columns(2)
+        with b_col1:
+            st.markdown("🔒 **Privat**")
+            for cat in priv_cats:
+                saved = saved_priv_tab5.get(cat, {})
+                if isinstance(saved, int):
+                    saved_limit, saved_freq = saved, "quarterly" if cat in QUARTERLY_DEFAULT else "monthly"
+                else:
+                    saved_limit = saved.get("limit", 0)
+                    saved_freq  = saved.get("frequency", "quarterly" if cat in QUARTERLY_DEFAULT else "monthly")
+                c1, c2 = st.columns([3, 2], vertical_alignment="bottom")
+                limit = c1.number_input(cat, 0, 100_000, int(saved_limit), step=100, key=f"budget_priv_{cat}")
+                freq  = c2.selectbox("Periode", ["md", "kvartal"], index=0 if saved_freq == "monthly" else 1,
+                                     key=f"freq_priv_{cat}", label_visibility="collapsed")
+                new_budgets_priv[cat] = {"limit": limit, "frequency": "monthly" if freq == "md" else "quarterly"}
+
+        with b_col2:
+            st.markdown("👫 **Fælles**")
+            for cat in shared_cats:
+                saved = saved_shared_tab5.get(cat, {})
+                if isinstance(saved, int):
+                    saved_limit, saved_freq = saved, "monthly"
+                else:
+                    saved_limit = saved.get("limit", 0)
+                    saved_freq  = saved.get("frequency", "monthly")
+                c1, c2 = st.columns([3, 2], vertical_alignment="bottom")
+                limit = c1.number_input(cat, 0, 100_000, int(saved_limit), step=100, key=f"budget_shared_{cat}")
+                freq  = c2.selectbox("Periode", ["md", "kvartal"], index=0 if saved_freq == "monthly" else 1,
+                                     key=f"freq_shared_{cat}", label_visibility="collapsed")
+                new_budgets_shared[cat] = {"limit": limit, "frequency": "monthly" if freq == "md" else "quarterly"}
 
         # ── Balance sheet ─────────────────────────────────────────────────────
         with st.expander("💰 Formue & Balance Sheet"):
@@ -664,6 +915,19 @@ with tab5:
             pen_val  = a1.number_input("Pensionsopsparing inkl. arbejdsgiver (DKK)", 0, 10_000_000, int(saved_assets.get("pension_dkk", 0)), step=10_000, key="bs_pen")
             re_val   = a2.number_input("Friværdi — fast ejendom (DKK)", 0, 10_000_000, int(saved_assets.get("real_estate_equity_dkk", 0)), step=10_000, key="bs_re")
             oth_val  = a1.number_input("Øvrige aktiver (DKK)", 0, 10_000_000, int(saved_assets.get("other_dkk", 0)), step=10_000, key="bs_oth")
+            saved_gold = profile.get("gold", {}) or {}
+            gold_count = a2.number_input("Guld Centenario mønter (antal)", 0, 100, int(saved_gold.get("centenario_count", 0)), step=1, key="gold_count",
+                                         help="Østrigsk 100-Corona guldmønt — 1,20565 troy oz rent guld per mønt")
+            if gold_count > 0:
+                _gv = _cached_gold(gold_count)
+                _gh = _cached_gold_history(gold_count)
+                if _gv:
+                    st.metric("Aktuel værdi", f"{_gv:,.0f} DKK", help="Live guldpris via Yahoo Finance + ECB valuta")
+                if _gh is not None:
+                    st.caption("Porteføljeværdi — seneste 6 måneder (DKK)")
+                    st.line_chart(_gh)
+                elif _gv is None:
+                    st.caption("Guldkurs utilgængelig — tjek internetforbindelsen")
             new_assets = {"liquidity_dkk": liq_val, "investments_dkk": inv_val,
                           "pension_dkk": pen_val, "real_estate_equity_dkk": re_val, "other_dkk": oth_val}
 
@@ -706,12 +970,27 @@ with tab5:
             ret_age   = p3.number_input("Pensionsalder-mål", 50, 75, int(saved_pen.get("target_retirement_age", 67)), step=1, key="pen_age")
             new_pension = {"employer_contribution_pct": emp_pct, "private_contribution_dkk": priv_dkk, "target_retirement_age": ret_age}
 
+            st.divider()
+            st.markdown("**Sikkerhedsnet (arbejdsløshedsdagpenge)**")
+            saved_dag = profile.get("dagpenge", {})
+            d1, d2, d3 = st.columns(3)
+            dag_pre    = d1.number_input("Dagpenge brutto (DKK/md)", 0, 100_000, int(saved_dag.get("monthly_gross_dkk", 22000)), step=500, key="dag_pre",
+                                         help="Maksimal månedlig dagpenge før skat")
+            dag_post   = d2.number_input("Dagpenge netto (DKK/md)", 0, 100_000, int(saved_dag.get("monthly_net_dkk", 16500)), step=500, key="dag_post",
+                                         help="Effektiv udbetaling efter skat — ca. 16-17k")
+            dag_weeks = d3.number_input("Udbetalingsuge (max)", 0, 156, int(saved_dag.get("max_weeks", 104)), step=4, key="dag_weeks",
+                                        help="Standard: 2 år = 104 uger")
+            new_dagpenge = {"monthly_gross_dkk": dag_pre, "monthly_net_dkk": dag_post, "max_weeks": dag_weeks}
+
         if st.button("💾 Gem profil", type="primary"):
             save_profile({"age": age, "income": income_p, "net_worth": net_worth,
                           "family": family, "career": career, "goals": goals,
-                          "freedom": freedom, "budgets": new_budgets,
+                          "freedom": freedom,
+                          "budgets_private": new_budgets_priv, "budgets_shared": new_budgets_shared,
                           "assets": new_assets, "liabilities": new_liabs,
-                          "insurance": new_insurance, "pension": new_pension})
+                          "insurance": new_insurance, "pension": new_pension,
+                          "dagpenge": new_dagpenge,
+                          "gold": {"centenario_count": gold_count}})
             st.success("Profil gemt!")
 
     with col2:

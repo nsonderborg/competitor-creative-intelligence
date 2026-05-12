@@ -9,6 +9,7 @@ remain in each entry point; pass PROCESSED explicitly to load_all_processed().
 import io
 import json
 import re
+import requests
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -44,9 +45,14 @@ CATEGORIES = {
     "Bolig":             ["husleje", "el ", "vand ", "varme", "internet", "bredbånd", "forsikring", "ejendom", "andels"],
     "Shopping":          ["zalando", "zara", "h&m", "asos", "amazon", "ebay", "magasin", "illum", "vinted", "roede kors", "tipster"],
     "MobilePay":         ["mobilepay", "mp "],
-    "Overførsler":       ["overf", "transfer"],
-    "Løn & Indkomst":    ["løn", "salary", "dagpenge", "su ", "honorar", "konsulent", "faktura", "a-kasse"],
+    "Overførsler":       ["overf", "transfer", "revolut", "saxo", "aktiesparekonto"],
+    "Løn & Indkomst":    ["løn", "salary", "dagpenge", "su ", "honorar", "konsulent", "faktura"],
+    "A-kasse":           ["a-kasse"],
+    "Forsikringer":      ["forsikring", "gjensidige"],
     "Børn & Familie":    ["legetøj", "kids", "børn", "bleer", "sfo", "vuggestue", "dagpleje"],
+    "Indretning":        ["ikea", "jysk", "ilva", "bolia", "søstrene grene", "tiger store", "imerco", "sinnerup", "inspiration"],
+    "Renteindtægt":      ["rente", "interest", "rentetilskrivning"],
+    "Erhvervsindkomst":  [],
     "Andet":             [],
 }
 
@@ -69,7 +75,11 @@ def _override_key(row) -> str:
     """Build the stable key used for per-transaction category overrides."""
     dato = row.get("dato")
     dato_str = dato.strftime("%Y-%m-%d") if pd.notna(dato) else "NaT"
-    return f"{dato_str}||{row.get('beløb', '')}||{row.get('label', '')}"
+    beløb = row.get("beløb")
+    # Format float consistently: always show as float to avoid -28 vs -28.0 mismatch
+    beløb_str = f"{float(beløb)}" if pd.notna(beløb) and beløb is not None else ""
+    label = str(row.get("label", "")) if row.get("label") is not None else ""
+    return f"{dato_str}||{beløb_str}||{label}"
 
 
 def categorize(row, rules: dict, overrides: dict | None = None) -> str:
@@ -245,6 +255,8 @@ def parse_any(path_or_buffer, filename: str) -> pd.DataFrame | None:
     ext = Path(filename).suffix.lower()
     if ext == ".numbers":
         p = path_or_buffer if not hasattr(path_or_buffer, "read") else _save_tmp(path_or_buffer, filename)
+        if "revolut" in filename.lower():
+            return parse_revolut_numbers(p)
         return parse_numbers_file(p)
     elif ext in (".csv", ".txt"):
         return parse_csv_file(path_or_buffer)
@@ -331,20 +343,48 @@ TOP 10 UDGIFTER:
 {top_str}
 """
     if budgets:
+        now = datetime.now()
+        # Monthly budget period
         current_month = real[
-            real["dato"].dt.year.eq(datetime.now().year) &
-            real["dato"].dt.month.eq(datetime.now().month)
+            real["dato"].dt.year.eq(now.year) & real["dato"].dt.month.eq(now.month)
         ]
         by_cat_month = current_month[current_month["beløb"] < 0].groupby("kategori")["beløb"].sum().abs()
+
+        # Quarterly budget period
+        quarter = (now.month - 1) // 3
+        quarter_start_month = quarter * 3 + 1
+        current_quarter = real[
+            real["dato"].dt.year.eq(now.year) &
+            real["dato"].dt.month.ge(quarter_start_month) &
+            real["dato"].dt.month.le(quarter_start_month + 2)
+        ]
+        by_cat_quarter = current_quarter[current_quarter["beløb"] < 0].groupby("kategori")["beløb"].sum().abs()
+
         budget_lines = []
-        for cat, limit in sorted(budgets.items()):
+        for cat, budget_val in sorted(budgets.items()):
+            # Handle both old format (int) and new format (dict)
+            if isinstance(budget_val, int):
+                limit = budget_val
+                freq = "monthly"
+            else:
+                limit = budget_val.get("limit", 0)
+                freq = budget_val.get("frequency", "monthly")
+
             if limit <= 0:
                 continue
-            spent = by_cat_month.get(cat, 0)
-            pct   = spent / limit * 100
-            budget_lines.append(f"  {cat}: {spent:,.0f} / {limit:,.0f} DKK ({pct:.0f}%)")
+
+            if freq == "quarterly":
+                spent = by_cat_quarter.get(cat, 0)
+                period_label = f"K{quarter+1} {now.year}"
+            else:
+                spent = by_cat_month.get(cat, 0)
+                period_label = now.strftime("%B %Y")
+
+            pct = spent / limit * 100
+            budget_lines.append(f"  {cat}: {spent:,.0f} / {limit:,.0f} DKK ({pct:.0f}%) — {period_label}")
+
         if budget_lines:
-            ctx += "\nBUDGETMÅL (denne måned):\n" + "\n".join(budget_lines) + "\n"
+            ctx += "\nBUDGETSTATUS:\n" + "\n".join(budget_lines) + "\n"
 
     if profile:
         ctx += f"""
@@ -371,6 +411,11 @@ _SAXO_ISIN_NAMES = {
     "IE00B4L5Y983": "iShares Core MSCI World",
     "IE00B5BMR087": "iShares Core S&P 500",
     "IE00B4L5YC18": "iShares MSCI Emerging Markets",
+}
+
+_DK_MONTH_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "maj": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "okt": 10, "nov": 11, "dec": 12,
 }
 
 
@@ -434,7 +479,8 @@ def parse_saxo_pdf(path, config_dir: Path | None = None) -> dict:
         period_end   = _saxo_date_str(m.group(2))
         as_of        = period_end
 
-    m = re.search(r"ChangeinAccountValue\s+return\s+([-\d.]+)%", p2)
+    # "To t a lreturn\n5.13%" — pypdf splits "Total" with spaces; "return" is attached to "l"
+    m = re.search(r"To\s*t\s*a\s*l\s*return\s*\n?([-\d.]+)%", p2)
     total_return_pct = float(m.group(1)) if m else None
 
     # ── Monthly returns (page 4) ───────────────────────────────────────────────
@@ -449,23 +495,24 @@ def parse_saxo_pdf(path, config_dir: Path | None = None) -> dict:
             monthly_returns[month] = float(val)
 
     # ── Per-ETF %Return (page 5) ───────────────────────────────────────────────
-    # Each line: "{SquishedName}UCITSETF - 5.23%"
-    etf_returns = [float(v) for v in re.findall(r"UCITSETF - ([-\d.]+)%", p5)]
+    # Each line: "{SquishedName}UCITSETF {income} {costs} {pl} {return}%"
+    etf_returns = [float(v) for v in re.findall(r"UCITSETF\s+[-\d.,]+\s+[-\d.,]+\s+[-\d.,]+\s+([-\d.]+)%", p5)]
 
     # ── Holdings (page 6) ─────────────────────────────────────────────────────
-    # Pattern: "UCITSETF(ISIN:\n{ISIN})\nEUR\n Equity {conv} {open} {current} {chg}% {weight}%"
+    # Pattern: "UCITSETF(ISIN:\n{ISIN})\nEUR\n Equity {qty} {conv} {open} {current} {chg}% {unrealized_pl} {market_value} {weight}%"
     holding_re = re.compile(
         r"UCITSETF\(ISIN:\n([A-Z]{2}[A-Z0-9]{10})\)\nEUR\n Equity "
-        r"([\d.]+) ([\d.]+) ([\d.]+) ([-\d.]+)% ([\d.]+)%"
+        r"(\d+) ([\d.]+) ([\d.]+) ([\d.]+) ([-\d.]+)% [-\d.,]+ [\d,.]+ ([\d.]+)%"
     )
     holdings = []
     for i, hm in enumerate(holding_re.finditer(p6)):
         isin       = hm.group(1)
-        conv_rate  = float(hm.group(2))
-        open_price = float(hm.group(3))
-        curr_price = float(hm.group(4))
-        price_chg  = float(hm.group(5))
-        weight_pct = float(hm.group(6))
+        # group(2) = quantity — not stored (redacted from context)
+        conv_rate  = float(hm.group(3))
+        open_price = float(hm.group(4))
+        curr_price = float(hm.group(5))
+        price_chg  = float(hm.group(6))
+        weight_pct = float(hm.group(7))
         return_pct = etf_returns[i] if i < len(etf_returns) else None
         holdings.append({
             "name":              _SAXO_ISIN_NAMES.get(isin, isin),
@@ -479,8 +526,8 @@ def parse_saxo_pdf(path, config_dir: Path | None = None) -> dict:
             "eur_dkk_rate":      conv_rate,
         })
 
-    # Cash position
-    m = re.search(r"Cash - ([\d.]+)%", p6)
+    # Cash position — summary row: "Cash - {market_value} {weight}%"
+    m = re.search(r"Cash\s+-\s+[\d.,]+\s+([\d.]+)%", p6)
     if m:
         holdings.append({"name": "Cash", "isin": None, "currency": "DKK",
                          "weight_pct": float(m.group(1)), "return_pct": None})
@@ -571,10 +618,200 @@ def parse_saxo_numbers(path) -> pd.DataFrame | None:
     return df.sort_values("dato", ascending=False, na_position="first").reset_index(drop=True)
 
 
-def build_balance_sheet_context(profile: dict) -> str:
+def _parse_revolut_date(val) -> "pd.Timestamp":
+    """Parse Danish date '2. jan. 2026' → pd.Timestamp, or pd.NaT on failure."""
+    if val is None:
+        return pd.NaT
+    s = str(val).strip()
+    m = re.search(r"(\d+)\.\s*(\w+)\.?\s*(\d{4})", s)
+    if not m:
+        return pd.NaT
+    day = int(m.group(1))
+    month_name = m.group(2).lower()[:3]
+    year = int(m.group(3))
+    month = _DK_MONTH_MAP.get(month_name)
+    if not month:
+        return pd.NaT
+    return pd.Timestamp(year, month, day)
+
+
+def _parse_revolut_amount(val) -> float | None:
+    """Parse Revolut amount '1.234,56 DKK' or '12,34€ (1.234,56 DKK)' → float (DKK)."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    # EUR account format: "12,34€ (1.234,56 DKK)" — extract the DKK value in parens
+    paren = re.search(r"\(([^)]+DKK)\)", s)
+    if paren:
+        s = paren.group(1)
+    # Strip trailing currency label
+    s = re.sub(r"\s*(DKK|SEK|EUR|€)\s*$", "", s, flags=re.IGNORECASE).strip()
+    return _clean_amount(s)
+
+
+def parse_revolut_numbers(path) -> "pd.DataFrame | None":
+    """Parse a Revolut consolidated .numbers statement → normalised transaction DataFrame.
+
+    The file contains multiple embedded transaction sections (one per sub-account).
+    Sections are identified by a header row where column 0 == 'Dato'.
+    Each Revolut row gets a ``_revolut_account`` column with the sub-account name.
+    """
+    try:
+        from numbers_parser import Document
+    except ImportError:
+        subprocess.run(["pip", "install", "numbers-parser", "--break-system-packages", "-q"], check=True)
+        from numbers_parser import Document
+
+    doc   = Document(str(path))
+    sheet = doc.sheets[0]
+    table = sheet.tables[0]
+    rows  = [[cell.value for cell in row] for row in table.iter_rows()]
+    if not rows:
+        return None
+
+    dato_indices = [i for i, row in enumerate(rows) if str(row[0] or "").strip() == "Dato"]
+    if not dato_indices:
+        return None
+
+    frames = []
+    for h in dato_indices:
+        # Scan backwards up to 30 rows for the sub-account name.
+        # Skip generic section labels that appear every section.
+        _SKIP_ACCOUNT_VALS = frozenset({
+            "dato", "transaktionsopgørelse", "i alt", "---------", "",
+            "transaction statement (only interest receipt)",
+        })
+        account_name = "Revolut"
+        for back_i in range(h - 1, max(0, h - 30) - 1, -1):
+            cell_val = str(rows[back_i][0] or "").strip()
+            if cell_val.lower() not in _SKIP_ACCOUNT_VALS and not re.match(r"^\d", cell_val):
+                account_name = f"Revolut {cell_val}"
+                break
+
+        # Map column names to indices from the header row
+        header_row = [str(c or "").strip() for c in rows[h]]
+        col_idx: dict[str, int] = {name: i for i, name in enumerate(header_row)}
+
+        if "Dato" not in col_idx or "Indtægtsført/udgiftsført beløb" not in col_idx:
+            continue
+
+        dato_col     = col_idx["Dato"]
+        beloeb_col   = col_idx["Indtægtsført/udgiftsført beløb"]
+        besk_col     = col_idx.get("Beskrivelse")
+        kat_col      = col_idx.get("Kategori")
+        saldo_col    = col_idx.get("Saldo")
+
+        # Collect transaction rows until empty row or next "Dato" header
+        tx_rows = []
+        for r_i in range(h + 1, len(rows)):
+            row = rows[r_i]
+            if all(v is None for v in row):
+                break
+            if str(row[0] or "").strip() == "Dato":
+                break
+            if row[dato_col] is None:
+                continue
+            tx_rows.append(row)
+
+        if not tx_rows:
+            continue
+
+        records = []
+        for row in tx_rows:
+            dato = _parse_revolut_date(row[dato_col])
+            if pd.isna(dato):
+                continue  # skip "I alt" totals rows and unparseable dates
+            beloeb = _parse_revolut_amount(row[beloeb_col])
+            if beloeb is None:
+                continue
+            records.append({
+                "dato":               dato,
+                "beskrivelse":        str(row[besk_col] or "").strip() if besk_col is not None else "",
+                "_revolut_kategori":  str(row[kat_col]  or "").strip() if kat_col  is not None else "",
+                "beløb":              beloeb,
+                "saldo":              _parse_revolut_amount(row[saldo_col]) if saldo_col is not None else None,
+            })
+
+        if not records:
+            continue
+
+        sec_df = pd.DataFrame(records)
+        sec_df["navn"]              = None
+        sec_df["modtager"]          = None
+        sec_df["afsender"]          = None
+        sec_df["valuta"]            = "DKK"
+        sec_df["reserveret"]        = False
+        sec_df["label"]             = sec_df["beskrivelse"].astype(str)
+        sec_df["type"]              = sec_df["beløb"].apply(lambda x: "Indkomst" if x > 0 else "Udgift")
+        sec_df["kategori"]          = sec_df.apply(lambda r: categorize(r, CATEGORIES), axis=1)
+        sec_df["_revolut_account"]  = account_name
+        frames.append(sec_df)
+
+    if not frames:
+        return None
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["dato", "beløb", "label"])
+    return combined.sort_values("dato", ascending=False, na_position="first").reset_index(drop=True)
+
+
+def fetch_gold_price_dkk(count: int) -> float | None:
+    """Return total DKK value of ``count`` Centenario coins using live gold spot price.
+
+    Uses Yahoo Finance (GC=F, gold futures USD/troy oz) + Frankfurter ECB rates.
+    Both APIs are free and require no API key.
+    Returns None on any network or parsing failure.
+    """
+    CENTENARIO_TROY_OZ = 1.20565  # pure gold content per Austrian 100-Corona coin
+    try:
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF",
+            params={"interval": "1d", "range": "1d"},
+            timeout=5,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        xau_usd = r.json()["chart"]["result"][0]["meta"]["regularMarketPrice"]
+        r2 = requests.get("https://api.frankfurter.app/latest?from=USD&to=DKK", timeout=5)
+        usd_dkk = r2.json()["rates"]["DKK"]
+        return round(count * CENTENARIO_TROY_OZ * xau_usd * usd_dkk, 0)
+    except Exception:
+        return None
+
+
+def fetch_gold_history_dkk(count: int, period: str = "6mo") -> "pd.Series | None":
+    """Return a daily pd.Series (date index → DKK value for ``count`` coins) over ``period``.
+
+    Uses Yahoo Finance GC=F futures + Frankfurter ECB USD→DKK for the latest FX rate.
+    Returns None on failure.
+    """
+    CENTENARIO_TROY_OZ = 1.20565
+    try:
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF",
+            params={"interval": "1d", "range": period},
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        result = r.json()["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        closes = result["indicators"]["quote"][0]["close"]
+        r2 = requests.get("https://api.frankfurter.app/latest?from=USD&to=DKK", timeout=5)
+        usd_dkk = r2.json()["rates"]["DKK"]
+        dates = pd.to_datetime(timestamps, unit="s").normalize()
+        values = [
+            round(count * CENTENARIO_TROY_OZ * (c or 0) * usd_dkk, 0) if c else None
+            for c in closes
+        ]
+        s = pd.Series(values, index=dates, name="DKK").dropna()
+        return s if not s.empty else None
+    except Exception:
+        return None
+
+
+def build_balance_sheet_context(profile: dict, gold_value_dkk: float | None = None) -> str:
     """Format the balance sheet section of the user profile for AI context.
 
-    Covers assets, liabilities, insurance, and pension.
+    Covers assets, liabilities, insurance, pension, and unemployment benefits (dagpenge).
     Returns an empty string if none of the balance sheet fields are populated.
     """
     if not profile:
@@ -584,8 +821,9 @@ def build_balance_sheet_context(profile: dict) -> str:
     liabilities = profile.get("liabilities", [])
     insurance   = profile.get("insurance", {})
     pension     = profile.get("pension", {})
+    dagpenge    = profile.get("dagpenge", {})
 
-    if not any([assets, liabilities, insurance, pension]):
+    if not any([assets, liabilities, insurance, pension, dagpenge]):
         return ""
 
     # ── Assets ────────────────────────────────────────────────────────────────
@@ -594,7 +832,9 @@ def build_balance_sheet_context(profile: dict) -> str:
     pension_sav  = assets.get("pension_dkk", 0) or 0
     real_estate  = assets.get("real_estate_equity_dkk", 0) or 0
     other_assets = assets.get("other_dkk", 0) or 0
-    total_assets = liquidity + investments + pension_sav + real_estate + other_assets
+    gold_val     = gold_value_dkk or 0
+    gold_count   = (profile.get("gold", {}) or {}).get("centenario_count", 0) or 0
+    total_assets = liquidity + investments + pension_sav + real_estate + other_assets + gold_val
 
     asset_lines = []
     if liquidity:    asset_lines.append(f"  Likviditet (kontanter/opsparing): {liquidity:,.0f} DKK")
@@ -602,6 +842,7 @@ def build_balance_sheet_context(profile: dict) -> str:
     if pension_sav:  asset_lines.append(f"  Pension (arbejdsmarkeds + privat):{pension_sav:,.0f} DKK")
     if real_estate:  asset_lines.append(f"  Fast ejendom (friværdi):          {real_estate:,.0f} DKK")
     if other_assets: asset_lines.append(f"  Andet:                            {other_assets:,.0f} DKK")
+    if gold_val:     asset_lines.append(f"  Guld (Centenario \xd7 {gold_count}):          {gold_val:,.0f} DKK (live kurs)")
 
     # ── Liabilities ───────────────────────────────────────────────────────────
     total_liab = sum((d.get("balance_dkk") or 0) for d in liabilities)
@@ -655,6 +896,20 @@ NETTO FORMUE: {net_worth:,.0f} DKK
     if ret_age:  pen_lines.append(f"  Pensionsalder-mål: {ret_age} år")
     if len(pen_lines) > 1 or emp_pct or priv_dkk or ret_age:
         ctx += "PENSION:\n" + "\n".join(pen_lines) + "\n"
+
+    # ── Unemployment benefits (dagpenge) ───────────────────────────────────────
+    dag_gross  = dagpenge.get("monthly_gross_dkk")
+    dag_net    = dagpenge.get("monthly_net_dkk")
+    dag_weeks  = dagpenge.get("max_weeks")
+    if dag_gross or dag_net:
+        dag_lines = []
+        if dag_gross:
+            dag_lines.append(f"  Dagpenge brutto: {dag_gross:,.0f} DKK/md")
+        if dag_net:
+            dag_lines.append(f"  Dagpenge netto (efter skat): {dag_net:,.0f} DKK/md")
+        if dag_weeks:
+            dag_lines.append(f"  Maks. udbetalingsperiode: {dag_weeks} uger ({dag_weeks // 4} mdr.)")
+        ctx += "SIKKERHEDSNET (ARBEJDSLØSHEDSDAGPENGE):\n" + "\n".join(dag_lines) + "\n"
 
     return ctx
 
