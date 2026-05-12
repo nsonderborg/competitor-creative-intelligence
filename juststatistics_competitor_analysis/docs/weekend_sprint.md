@@ -79,7 +79,7 @@
   - `hooks[]` — are they specific and grounded in the reviews?
   - `brand_report` — does it read like a usable agency doc?
   - `run_stats.estimated_cost_usd` — should be ~$0.10–0.20
-  - `run_stats.duration_seconds` — should be <900s (15 min)
+  - `run_stats.duration_seconds` — check execution time is reasonable
 - [ ] Paste the `brand_report` markdown into Notion or a `.md` file to review formatting
 - [ ] Fix any issues, re-run
 
@@ -122,7 +122,7 @@ If DNS propagation is slow or VPS setup runs over, do Session 2 locally:
 
 | Metric | Target |
 |--------|--------|
-| Pipeline runtime | < 15 minutes |
+| Pipeline runtime | Reasonable for async research task |
 | Cost per run | < $0.20 |
 | Hooks generated | 12, each with confidence score |
 | Report length | 800–1200 words |

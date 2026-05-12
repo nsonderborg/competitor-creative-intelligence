@@ -2,8 +2,8 @@
 
 ## Project Purpose
 
-Automate the JustStatics pre-production research workflow. Currently takes 4 hours manually.
-Target: 15-minute end-to-end pipeline per brand.
+Automate the JustStatics pre-production research workflow.
+Target: end-to-end pipeline per brand.
 
 Output per run:
 - `hooks[]` — 12 ad copy angle "hooks" ranked by confidence score
@@ -215,7 +215,7 @@ openssl rand -hex 16
 - [ ] PostgreSQL healthy, `run_history` table created
 - [ ] Health check cron running, heartbeat URL configured
 
-### Step 2 — Vision Analyst Node (Day 2–3, ~4h)
+### Step 2 — Vision Analyst Node (Day 2–3)
 - [ ] HTTP Request node: base64 image → Sonnet 4.6 → Vision Analyst JSON
 - [ ] Prompt caching active (`anthropic-beta` header set)
 - [ ] Token counts captured from response `usage` field
@@ -228,4 +228,4 @@ openssl rand -hex 16
 - [ ] Parallel Vision Analyst via SplitInBatches
 - [ ] Webhook trigger live
 - [ ] End-to-end test: 1 brand, 5 ads, 40 reviews
-- [ ] Target: <15 min runtime, <$0.20 cost per run
+- [ ] Target: <$0.20 cost per run
